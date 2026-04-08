@@ -1,0 +1,246 @@
+{% extends "base.html" %}
+{% block title %}SIEM - Dashboard{% endblock %}
+{% block nav_dashboard %}active{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+
+{% block content %}
+<div x-data="dashboardData()" x-init="fetchStats()">
+
+    <!-- Stat Cards -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-label">Total Events (24h)</div>
+            <div class="stat-value accent" x-text="stats.total?.toLocaleString() ?? '...'"></div>
+            <div class="stat-sub" x-text="stats.by_source?.length + ' sources active'"></div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Critical Events</div>
+            <div class="stat-value danger" x-text="criticalCount.toLocaleString()"></div>
+            <div class="stat-sub">Requires attention</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">High Severity</div>
+            <div class="stat-value warning" x-text="highCount.toLocaleString()"></div>
+            <div class="stat-sub">Last 24 hours</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Top Host</div>
+            <div class="stat-value" style="font-size:18px;" x-text="topHost"></div>
+            <div class="stat-sub" x-text="topHostCount + ' events'"></div>
+        </div>
+    </div>
+
+    <!-- Charts Row -->
+    <div class="grid-3">
+        <!-- Timeline Chart -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Event Timeline (24h)</span>
+                <span class="spinner htmx-indicator"></span>
+            </div>
+            <div class="chart-container">
+                <canvas id="timelineChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Severity Breakdown -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">By Severity</span>
+            </div>
+            <div class="chart-container">
+                <canvas id="severityChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bottom Row -->
+    <div class="grid-2">
+        <!-- Recent Events -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Recent Events</span>
+                <a href="/events" class="btn btn-sm btn-secondary">View All</a>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Source</th>
+                            <th>Severity</th>
+                            <th>Message</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recent-events"
+                           hx-get="/partials/recent-events"
+                           hx-trigger="load, every 15s"
+                           hx-swap="innerHTML">
+                        <tr><td colspan="4" class="text-muted">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Sources Breakdown -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Events by Source</span>
+            </div>
+            <div class="chart-container">
+                <canvas id="sourceChart"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function dashboardData() {
+    return {
+        stats: {},
+        criticalCount: 0,
+        highCount: 0,
+        topHost: '...',
+        topHostCount: 0,
+        timelineChart: null,
+        severityChart: null,
+        sourceChart: null,
+
+        async fetchStats() {
+            try {
+                const resp = await fetch('/api/v1/dashboard/stats?hours=24');
+                this.stats = await resp.json();
+                this.updateCounts();
+                this.renderTimeline();
+                this.renderSeverity();
+                this.renderSources();
+            } catch (e) {
+                console.error('Failed to fetch stats:', e);
+            }
+            // Refresh every 30s
+            setTimeout(() => this.fetchStats(), 30000);
+        },
+
+        updateCounts() {
+            const sev = this.stats.by_severity || [];
+            this.criticalCount = sev.find(s => s.key === 'critical')?.doc_count || 0;
+            this.highCount = sev.find(s => s.key === 'high')?.doc_count || 0;
+            const hosts = this.stats.by_host || [];
+            if (hosts.length > 0) {
+                this.topHost = hosts[0].key;
+                this.topHostCount = hosts[0].doc_count;
+            }
+        },
+
+        renderTimeline() {
+            const ctx = document.getElementById('timelineChart');
+            if (!ctx) return;
+            const buckets = this.stats.timeline || [];
+            const labels = buckets.map(b => {
+                const d = new Date(b.key_as_string || b.key);
+                return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            });
+            const data = buckets.map(b => b.doc_count);
+
+            if (this.timelineChart) this.timelineChart.destroy();
+            this.timelineChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels,
+                    datasets: [{
+                        label: 'Events',
+                        data,
+                        backgroundColor: 'rgba(79, 143, 247, 0.5)',
+                        borderColor: 'rgba(79, 143, 247, 1)',
+                        borderWidth: 1,
+                        borderRadius: 3,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: {
+                            ticks: { color: '#8b8fa3', maxTicksLimit: 12 },
+                            grid: { color: '#2a2d3a' }
+                        },
+                        y: {
+                            ticks: { color: '#8b8fa3' },
+                            grid: { color: '#2a2d3a' }
+                        }
+                    }
+                }
+            });
+        },
+
+        renderSeverity() {
+            const ctx = document.getElementById('severityChart');
+            if (!ctx) return;
+            const buckets = this.stats.by_severity || [];
+            const colorMap = {
+                low: '#4fc3f7',
+                medium: '#f7a94f',
+                high: '#f74f4f',
+                critical: '#ff3333'
+            };
+
+            if (this.severityChart) this.severityChart.destroy();
+            this.severityChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: buckets.map(b => b.key),
+                    datasets: [{
+                        data: buckets.map(b => b.doc_count),
+                        backgroundColor: buckets.map(b => colorMap[b.key] || '#8b8fa3'),
+                        borderWidth: 0,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: { color: '#e1e4ed', padding: 16 }
+                        }
+                    }
+                }
+            });
+        },
+
+        renderSources() {
+            const ctx = document.getElementById('sourceChart');
+            if (!ctx) return;
+            const buckets = this.stats.by_source || [];
+            const colors = ['#4f8ff7', '#4ff77a', '#f7a94f', '#f74f4f', '#c34ff7', '#4fc3f7'];
+
+            if (this.sourceChart) this.sourceChart.destroy();
+            this.sourceChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: buckets.map(b => b.key),
+                    datasets: [{
+                        data: buckets.map(b => b.doc_count),
+                        backgroundColor: colors.slice(0, buckets.length),
+                        borderWidth: 0,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: { color: '#e1e4ed', padding: 16 }
+                        }
+                    }
+                }
+            });
+        }
+    };
+}
+</script>
+{% endblock %}

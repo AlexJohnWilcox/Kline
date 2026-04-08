@@ -1,0 +1,16 @@
+id: docker-privileged
+name: Docker Privileged Container
+description: A Docker container was started with --privileged flag
+severity: critical
+source: docker
+category: application
+conditions:
+  - field: action
+    operator: eq
+    value: container_start
+  - field: privileged
+    operator: eq
+    value: true
+threshold: 1
+window_seconds: 60
+tags: [docker, privilege-escalation]

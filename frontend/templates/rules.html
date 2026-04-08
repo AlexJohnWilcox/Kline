@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}SIEM - Rules{% endblock %}
+{% block nav_rules %}active{% endblock %}
+{% block page_title %}Detection Rules{% endblock %}
+
+{% block content %}
+<div x-data="rulesPage()">
+
+    <template x-if="loading">
+        <div class="empty-state"><p>Loading rules...</p></div>
+    </template>
+
+    <template x-if="!loading && rules.length === 0">
+        <div class="empty-state">
+            <div class="icon">&#9881;</div>
+            <p>No detection rules loaded</p>
+            <p class="text-muted mt-1">Add YAML rule files to the <code>rules/</code> directory.</p>
+        </div>
+    </template>
+
+    <div class="alert-list">
+        <template x-for="rule in rules" :key="rule.id">
+            <div class="alert-card" :class="'alert-' + rule.severity">
+                <div class="alert-card-header">
+                    <div class="alert-card-left">
+                        <span class="badge" :class="'badge-' + rule.severity" x-text="rule.severity"></span>
+                        <span class="badge" :class="rule.enabled ? 'badge-success' : 'badge-muted'"
+                              x-text="rule.enabled ? 'enabled' : 'disabled'"></span>
+                        <span class="alert-rule-name" x-text="rule.name"></span>
+                    </div>
+                    <div class="alert-card-right">
+                        <span class="text-muted text-mono" x-text="rule.id"></span>
+                    </div>
+                </div>
+                <p class="alert-description" x-text="rule.description"></p>
+
+                <div class="rule-details">
+                    <div class="context-tag" x-show="rule.source">
+                        <span class="context-key">source:</span>
+                        <span x-text="rule.source"></span>
+                    </div>
+                    <div class="context-tag" x-show="rule.category">
+                        <span class="context-key">category:</span>
+                        <span x-text="rule.category"></span>
+                    </div>
+                    <div class="context-tag">
+                        <span class="context-key">threshold:</span>
+                        <span x-text="rule.threshold + ' events in ' + rule.window_seconds + 's'"></span>
+                    </div>
+                    <template x-for="tag in rule.tags" :key="tag">
+                        <span class="badge badge-muted" x-text="tag"></span>
+                    </template>
+                </div>
+
+                <!-- Conditions -->
+                <div class="rule-conditions mt-1">
+                    <span class="field-label">Conditions</span>
+                    <div class="conditions-list">
+                        <template x-for="(cond, i) in rule.conditions" :key="i">
+                            <code class="condition-chip"
+                                  x-text="cond.field + ' ' + cond.operator + (cond.value !== null ? ' ' + cond.value : '')">
+                            </code>
+                        </template>
+                    </div>
+                </div>
+            </div>
+        </template>
+    </div>
+
+    <!-- Anomaly detectors info -->
+    <div class="card mt-2">
+        <div class="card-header">
+            <span class="card-title">Built-in Anomaly Detectors</span>
+        </div>
+        <div class="alert-list">
+            <div class="alert-card alert-medium" style="border-left-color: var(--warning);">
+                <div class="alert-card-header">
+                    <div class="alert-card-left">
+                        <span class="badge badge-medium">medium</span>
+                        <span class="badge badge-success">enabled</span>
+                        <span class="alert-rule-name">Volume Anomaly</span>
+                    </div>
+                </div>
+                <p class="alert-description">Detects unusual event volume per (source, category) — triggers when current hour exceeds 3 sigma above 7-day rolling baseline.</p>
+            </div>
+            <div class="alert-card alert-medium" style="border-left-color: var(--warning);">
+                <div class="alert-card-header">
+                    <div class="alert-card-left">
+                        <span class="badge badge-medium">medium</span>
+                        <span class="badge badge-success">enabled</span>
+                        <span class="alert-rule-name">Rare Event Detection</span>
+                    </div>
+                </div>
+                <p class="alert-description">Flags novel (source, category, action) tuples that appear in the last hour but have never been seen in the prior 7 days.</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function rulesPage() {
+    return {
+        rules: [],
+        loading: true,
+
+        async init() {
+            try {
+                const resp = await fetch('/api/v1/rules');
+                const data = await resp.json();
+                this.rules = data.rules || [];
+            } catch (e) {
+                console.error('Failed to fetch rules:', e);
+            }
+            this.loading = false;
+        },
+    };
+}
+</script>
+{% endblock %}

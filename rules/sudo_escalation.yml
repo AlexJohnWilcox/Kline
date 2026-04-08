@@ -1,0 +1,13 @@
+id: sudo-escalation
+name: Sudo Privilege Escalation
+description: Multiple sudo commands executed by the same user in a short window
+severity: medium
+source: syslog
+category: auth
+conditions:
+  - field: action
+    operator: eq
+    value: sudo_command
+threshold: 5
+window_seconds: 300
+tags: [sudo, privilege-escalation]

@@ -1,0 +1,240 @@
+{% extends "base.html" %}
+{% block title %}SIEM - Search{% endblock %}
+{% block nav_search %}active{% endblock %}
+{% block page_title %}AI Search{% endblock %}
+
+{% block content %}
+<div x-data="searchPage()">
+    <!-- Example query chips -->
+    <div class="search-chips">
+        <button @click="question = 'Show failed SSH logins in the last hour'; search()">Failed SSH logins</button>
+        <button @click="question = 'Any critical severity events today?'; search()">Critical events today</button>
+        <button @click="question = 'Docker containers started in the last 24 hours'; search()">Docker containers</button>
+        <button @click="question = 'Unusual outbound connections'; search()">Unusual outbound</button>
+        <button @click="question = 'Show sudo commands from the last 6 hours'; search()">Sudo commands</button>
+    </div>
+
+    <!-- Search input -->
+    <div class="search-bar">
+        <textarea x-model="question" placeholder="Ask about your logs in plain English..."
+                  @keydown.enter.prevent="search()" rows="2"></textarea>
+        <button class="btn btn-primary" @click="search()" :disabled="searching">
+            <template x-if="searching"><span class="spinner"></span></template>
+            <span x-text="searching ? 'Searching...' : 'Search'"></span>
+        </button>
+    </div>
+
+    <!-- Error -->
+    <template x-if="error">
+        <div class="card mb-2" style="border-left: 3px solid var(--danger);">
+            <p class="text-danger" x-text="error"></p>
+        </div>
+    </template>
+
+    <!-- AI Summary -->
+    <template x-if="summary">
+        <div class="card mb-2" style="border-left: 3px solid var(--accent);">
+            <div class="card-header">
+                <span class="card-title">AI Summary</span>
+            </div>
+            <p x-text="summary" style="line-height: 1.7;"></p>
+        </div>
+    </template>
+
+    <!-- Generated ES query (collapsible) -->
+    <template x-if="esQuery">
+        <div class="card mb-2">
+            <div class="card-header" @click="showQuery = !showQuery" style="cursor: pointer;">
+                <span class="card-title">Generated Query</span>
+                <span class="text-muted" x-text="showQuery ? '&#9650;' : '&#9660;'"></span>
+            </div>
+            <pre x-show="showQuery" x-text="JSON.stringify(esQuery, null, 2)"
+                 style="background: var(--bg); padding: 12px; border-radius: 4px; font-size: 12px; color: var(--text-muted); overflow-x: auto; white-space: pre-wrap;"></pre>
+        </div>
+    </template>
+
+    <!-- Results -->
+    <template x-if="searched">
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title" x-text="total + ' results'"></span>
+            </div>
+
+            <template x-if="events.length === 0">
+                <p class="text-muted">No matching events found.</p>
+            </template>
+
+            <div class="table-wrap" x-show="events.length > 0">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>Source</th>
+                            <th>Host</th>
+                            <th>Severity</th>
+                            <th>Category</th>
+                            <th>Message</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="event in events" :key="event.id">
+                            <tr class="expandable" @click="toggleExpand(event.id)">
+                                <td class="text-mono" x-text="formatTime(event.timestamp)"></td>
+                                <td><span class="badge badge-info" x-text="event.source"></span></td>
+                                <td class="text-mono" x-text="event.host"></td>
+                                <td>
+                                    <span class="badge" :class="'badge-' + event.severity" x-text="event.severity"></span>
+                                </td>
+                                <td x-text="event.category"></td>
+                                <td class="truncate" x-text="event.message"></td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </template>
+
+    <!-- Expanded Event Detail -->
+    <template x-if="expandedEvent">
+        <div class="card mt-2" style="border-left: 3px solid var(--accent);">
+            <div class="card-header">
+                <span class="card-title">Event Detail</span>
+                <div class="flex gap-1">
+                    <button class="btn btn-sm btn-secondary" @click="correlateEvent(expandedEvent.id)" :disabled="correlating">
+                        <template x-if="correlating"><span class="spinner"></span></template>
+                        Correlate
+                    </button>
+                    <button class="btn btn-sm btn-secondary" @click="expandedEvent = null">Close</button>
+                </div>
+            </div>
+            <div class="event-detail">
+                <div class="field-grid">
+                    <div>
+                        <div class="field-label">ID</div>
+                        <div class="field-value" x-text="expandedEvent.id"></div>
+                    </div>
+                    <div>
+                        <div class="field-label">Timestamp</div>
+                        <div class="field-value" x-text="expandedEvent.timestamp"></div>
+                    </div>
+                    <div>
+                        <div class="field-label">Source</div>
+                        <div class="field-value" x-text="expandedEvent.source"></div>
+                    </div>
+                    <div>
+                        <div class="field-label">Host</div>
+                        <div class="field-value" x-text="expandedEvent.host"></div>
+                    </div>
+                    <div>
+                        <div class="field-label">Severity</div>
+                        <div class="field-value" x-text="expandedEvent.severity"></div>
+                    </div>
+                    <div>
+                        <div class="field-label">Category</div>
+                        <div class="field-value" x-text="expandedEvent.category"></div>
+                    </div>
+                    <template x-for="(value, key) in (expandedEvent.parsed || {})" :key="key">
+                        <div>
+                            <div class="field-label" x-text="key"></div>
+                            <div class="field-value" x-text="value"></div>
+                        </div>
+                    </template>
+                </div>
+                <div class="field-label mb-1">Raw Log</div>
+                <pre x-text="expandedEvent.raw || expandedEvent.message"></pre>
+            </div>
+
+            <!-- Correlation result -->
+            <template x-if="correlationResult">
+                <div class="alert-ai-explanation mt-2">
+                    <span class="field-label">AI Correlation</span>
+                    <p x-text="correlationResult.correlation"></p>
+                    <p class="text-muted mt-1" x-text="correlationResult.related_count + ' related events found'"></p>
+                </div>
+            </template>
+        </div>
+    </template>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function searchPage() {
+    return {
+        question: '',
+        searching: false,
+        searched: false,
+        esQuery: null,
+        showQuery: false,
+        summary: null,
+        error: null,
+        events: [],
+        total: 0,
+        expandedEvent: null,
+        correlating: false,
+        correlationResult: null,
+
+        async search() {
+            if (!this.question.trim()) return;
+            this.searching = true;
+            this.searched = false;
+            this.error = null;
+            this.esQuery = null;
+            this.summary = null;
+            this.events = [];
+            this.total = 0;
+            this.expandedEvent = null;
+            this.correlationResult = null;
+            try {
+                const resp = await fetch('/api/v1/ai/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question: this.question })
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+                this.esQuery = data.es_query;
+                this.events = data.events || [];
+                this.total = data.total_hits || 0;
+                this.summary = data.summary;
+                this.searched = true;
+            } catch (e) {
+                this.error = 'Search failed. Is Ollama running? ' + e.message;
+            }
+            this.searching = false;
+        },
+
+        formatTime(ts) {
+            return new Date(ts).toLocaleString();
+        },
+
+        toggleExpand(eventId) {
+            if (this.expandedEvent?.id === eventId) {
+                this.expandedEvent = null;
+                this.correlationResult = null;
+            } else {
+                this.expandedEvent = this.events.find(e => e.id === eventId) || null;
+                this.correlationResult = null;
+            }
+        },
+
+        async correlateEvent(eventId) {
+            this.correlating = true;
+            this.correlationResult = null;
+            try {
+                const resp = await fetch('/api/v1/ai/correlate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ event_id: eventId, window_minutes: 5 })
+                });
+                this.correlationResult = await resp.json();
+            } catch (e) {
+                this.correlationResult = { correlation: 'Correlation failed: ' + e.message, related_event_ids: [], related_count: 0 };
+            }
+            this.correlating = false;
+        }
+    };
+}
+</script>
+{% endblock %}

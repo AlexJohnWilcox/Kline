@@ -1,0 +1,259 @@
+{% extends "base.html" %}
+{% block title %}SIEM - Events{% endblock %}
+{% block nav_events %}active{% endblock %}
+{% block page_title %}Events{% endblock %}
+
+{% block content %}
+<div x-data="eventsPage()">
+    <!-- Filters -->
+    <div class="filters">
+        <div class="filter-group">
+            <label>Source</label>
+            <select x-model="filters.source" @change="fetchEvents()">
+                <option value="">All Sources</option>
+                <option value="syslog">Syslog</option>
+                <option value="journald">Journald</option>
+                <option value="firewall">Firewall</option>
+                <option value="docker">Docker</option>
+                <option value="network">Network</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>Severity</label>
+            <select x-model="filters.severity" @change="fetchEvents()">
+                <option value="">All</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>Category</label>
+            <select x-model="filters.category" @change="fetchEvents()">
+                <option value="">All</option>
+                <option value="auth">Auth</option>
+                <option value="network">Network</option>
+                <option value="system">System</option>
+                <option value="application">Application</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>Search</label>
+            <input type="search" placeholder="Search messages..."
+                   x-model="filters.q"
+                   @keydown.enter="fetchEvents()"
+                   @input.debounce.500ms="fetchEvents()">
+        </div>
+        <div class="filter-group">
+            <label>&nbsp;</label>
+            <button class="btn btn-primary" @click="fetchEvents()">
+                Search
+            </button>
+        </div>
+        <div class="filter-group" style="margin-left: auto;">
+            <label>&nbsp;</label>
+            <button class="btn btn-secondary" @click="summarizeVisible()" :disabled="summarizing">
+                <template x-if="summarizing"><span class="spinner"></span></template>
+                AI Summarize
+            </button>
+        </div>
+    </div>
+
+    <!-- AI Summary (shown after summarize) -->
+    <template x-if="summary">
+        <div class="card mb-2" style="border-left: 3px solid var(--accent);">
+            <div class="card-header">
+                <span class="card-title">AI Summary</span>
+                <button class="btn btn-sm btn-secondary" @click="summary = null">Dismiss</button>
+            </div>
+            <p x-text="summary" style="line-height: 1.7;"></p>
+        </div>
+    </template>
+
+    <!-- Results Table -->
+    <div class="card">
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Timestamp</th>
+                        <th>Source</th>
+                        <th>Host</th>
+                        <th>Severity</th>
+                        <th>Category</th>
+                        <th>Message</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-if="loading">
+                        <tr><td colspan="6" class="text-muted">Loading...</td></tr>
+                    </template>
+                    <template x-if="!loading && events.length === 0">
+                        <tr><td colspan="6" class="text-muted">No events found</td></tr>
+                    </template>
+                    <template x-for="event in events" :key="event.id">
+                        <tr class="expandable" @click="toggleExpand(event.id)">
+                            <td class="text-mono" x-text="formatTime(event.timestamp)"></td>
+                            <td><span class="badge badge-info" x-text="event.source"></span></td>
+                            <td class="text-mono" x-text="event.host"></td>
+                            <td>
+                                <span class="badge"
+                                      :class="'badge-' + event.severity"
+                                      x-text="event.severity"></span>
+                            </td>
+                            <td x-text="event.category"></td>
+                            <td class="truncate" x-text="event.message"></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Pagination -->
+        <div class="pagination" x-show="total > 0">
+            <span class="pagination-info">
+                Showing <span x-text="((page-1)*size+1)"></span>-<span x-text="Math.min(page*size, total)"></span>
+                of <span x-text="total.toLocaleString()"></span> events
+            </span>
+            <div class="pagination-buttons">
+                <button class="btn btn-sm btn-secondary" @click="prevPage()" :disabled="page <= 1">Prev</button>
+                <button class="btn btn-sm btn-secondary" @click="nextPage()" :disabled="page * size >= total">Next</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Expanded Event Detail (modal-like overlay) -->
+    <template x-if="expandedEvent">
+        <div class="card mt-2" style="border-left: 3px solid var(--accent);">
+            <div class="card-header">
+                <span class="card-title">Event Detail</span>
+                <button class="btn btn-sm btn-secondary" @click="expandedEvent = null">Close</button>
+            </div>
+            <div class="event-detail">
+                <div class="field-grid">
+                    <div>
+                        <div class="field-label">ID</div>
+                        <div class="field-value" x-text="expandedEvent.id"></div>
+                    </div>
+                    <div>
+                        <div class="field-label">Timestamp</div>
+                        <div class="field-value" x-text="expandedEvent.timestamp"></div>
+                    </div>
+                    <div>
+                        <div class="field-label">Source</div>
+                        <div class="field-value" x-text="expandedEvent.source"></div>
+                    </div>
+                    <div>
+                        <div class="field-label">Host</div>
+                        <div class="field-value" x-text="expandedEvent.host"></div>
+                    </div>
+                    <div>
+                        <div class="field-label">Severity</div>
+                        <div class="field-value" x-text="expandedEvent.severity"></div>
+                    </div>
+                    <div>
+                        <div class="field-label">Category</div>
+                        <div class="field-value" x-text="expandedEvent.category"></div>
+                    </div>
+                    <template x-for="(value, key) in expandedEvent.parsed" :key="key">
+                        <div>
+                            <div class="field-label" x-text="key"></div>
+                            <div class="field-value" x-text="value"></div>
+                        </div>
+                    </template>
+                </div>
+                <div class="field-label mb-1">Raw Log</div>
+                <pre x-text="expandedEvent.raw || expandedEvent.message"></pre>
+            </div>
+        </div>
+    </template>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function eventsPage() {
+    return {
+        events: [],
+        total: 0,
+        page: 1,
+        size: 50,
+        loading: true,
+        filters: { source: '', severity: '', category: '', q: '' },
+        expandedEvent: null,
+        summary: null,
+        summarizing: false,
+
+        async fetchEvents() {
+            this.loading = true;
+            const params = new URLSearchParams();
+            if (this.filters.source) params.set('source', this.filters.source);
+            if (this.filters.severity) params.set('severity', this.filters.severity);
+            if (this.filters.category) params.set('category', this.filters.category);
+            if (this.filters.q) params.set('q', this.filters.q);
+            params.set('page', this.page);
+            params.set('size', this.size);
+
+            try {
+                const resp = await fetch(`/api/v1/events?${params}`);
+                const data = await resp.json();
+                this.events = data.events || [];
+                this.total = data.total || 0;
+            } catch (e) {
+                console.error('Failed to fetch events:', e);
+            }
+            this.loading = false;
+        },
+
+        async init() {
+            await this.fetchEvents();
+        },
+
+        formatTime(ts) {
+            const d = new Date(ts);
+            return d.toLocaleString();
+        },
+
+        toggleExpand(eventId) {
+            if (this.expandedEvent?.id === eventId) {
+                this.expandedEvent = null;
+            } else {
+                this.expandedEvent = this.events.find(e => e.id === eventId) || null;
+            }
+        },
+
+        prevPage() {
+            if (this.page > 1) {
+                this.page--;
+                this.fetchEvents();
+            }
+        },
+
+        nextPage() {
+            if (this.page * this.size < this.total) {
+                this.page++;
+                this.fetchEvents();
+            }
+        },
+
+        async summarizeVisible() {
+            if (this.events.length === 0) return;
+            this.summarizing = true;
+            try {
+                const resp = await fetch('/api/v1/ai/summarize', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ event_ids: this.events.map(e => e.id) })
+                });
+                const data = await resp.json();
+                this.summary = data.summary || 'No summary available.';
+            } catch (e) {
+                this.summary = 'Failed to generate summary. Is Ollama running?';
+            }
+            this.summarizing = false;
+        }
+    };
+}
+</script>
+{% endblock %}

@@ -1,0 +1,16 @@
+id: unusual-outbound-dns
+name: Unusual Outbound DNS Query
+description: DNS query to a non-standard DNS server (potential data exfiltration)
+severity: medium
+source: network
+category: network
+conditions:
+  - field: action
+    operator: eq
+    value: dns_query
+  - field: dst_port
+    operator: eq
+    value: 53
+threshold: 10
+window_seconds: 300
+tags: [dns, exfiltration]

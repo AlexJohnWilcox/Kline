@@ -1,0 +1,11 @@
+id: high-error-rate
+name: High Error Rate
+description: Elevated number of high-severity events across all sources
+severity: high
+conditions:
+  - field: severity
+    operator: eq
+    value: high
+threshold: 20
+window_seconds: 600
+tags: [error-rate, operational]

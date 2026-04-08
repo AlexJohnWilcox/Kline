@@ -1,0 +1,16 @@
+id: unusual-port
+name: Connection to Unusual Port
+description: Outbound connection to a commonly exploited port
+severity: high
+source: network
+category: network
+conditions:
+  - field: action
+    operator: contains
+    value: conntrack
+  - field: dst_port
+    operator: eq
+    value: 4444
+threshold: 1
+window_seconds: 300
+tags: [network, suspicious-port]

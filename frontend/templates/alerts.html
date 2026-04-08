@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+{% block title %}SIEM - Alerts{% endblock %}
+{% block nav_alerts %}active{% endblock %}
+{% block page_title %}Alerts{% endblock %}
+
+{% block content %}
+<div x-data="alertsPage()">
+
+    <!-- Status Tabs -->
+    <div class="tabs mb-2">
+        <button class="tab" :class="{ active: activeTab === '' }" @click="activeTab = ''; fetchAlerts()">
+            All <span class="tab-count" x-text="statusCounts.new + statusCounts.acknowledged + statusCounts.resolved"></span>
+        </button>
+        <button class="tab" :class="{ active: activeTab === 'new' }" @click="activeTab = 'new'; fetchAlerts()">
+            New <span class="tab-count badge-danger" x-show="statusCounts.new > 0" x-text="statusCounts.new"></span>
+        </button>
+        <button class="tab" :class="{ active: activeTab === 'acknowledged' }" @click="activeTab = 'acknowledged'; fetchAlerts()">
+            Acknowledged <span class="tab-count" x-show="statusCounts.acknowledged > 0" x-text="statusCounts.acknowledged"></span>
+        </button>
+        <button class="tab" :class="{ active: activeTab === 'resolved' }" @click="activeTab = 'resolved'; fetchAlerts()">
+            Resolved <span class="tab-count" x-show="statusCounts.resolved > 0" x-text="statusCounts.resolved"></span>
+        </button>
+    </div>
+
+    <!-- Filters -->
+    <div class="filters mb-2">
+        <div class="filter-group">
+            <label>Severity</label>
+            <select x-model="filters.severity" @change="fetchAlerts()">
+                <option value="">All</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>Time Range</label>
+            <select x-model="filters.hours" @change="fetchAlerts()">
+                <option value="24">Last 24h</option>
+                <option value="72">Last 3 days</option>
+                <option value="168" selected>Last 7 days</option>
+                <option value="720">Last 30 days</option>
+            </select>
+        </div>
+    </div>
+
+    <!-- Alert Cards -->
+    <template x-if="loading">
+        <div class="empty-state"><p>Loading alerts...</p></div>
+    </template>
+
+    <template x-if="!loading && alerts.length === 0">
+        <div class="empty-state">
+            <div class="icon">&#9888;</div>
+            <p>No alerts found</p>
+            <p class="text-muted mt-1">Alerts will appear here when detection rules trigger.</p>
+        </div>
+    </template>
+
+    <div class="alert-list">
+        <template x-for="alert in alerts" :key="alert.id">
+            <div class="alert-card" :class="'alert-' + alert.severity">
+                <div class="alert-card-header">
+                    <div class="alert-card-left">
+                        <span class="badge" :class="'badge-' + alert.severity" x-text="alert.severity"></span>
+                        <span class="badge" :class="{
+                            'badge-danger': alert.status === 'new',
+                            'badge-warning': alert.status === 'acknowledged',
+                            'badge-success': alert.status === 'resolved'
+                        }" x-text="alert.status"></span>
+                        <span class="alert-rule-name" x-text="alert.rule_name"></span>
+                    </div>
+                    <div class="alert-card-right">
+                        <span class="text-muted text-mono" x-text="formatTime(alert.timestamp)"></span>
+                    </div>
+                </div>
+                <p class="alert-description" x-text="alert.description"></p>
+
+                <!-- Context -->
+                <div class="alert-context" x-show="alert.context && Object.keys(alert.context).length > 0">
+                    <template x-for="(value, key) in alert.context" :key="key">
+                        <span class="context-tag">
+                            <span class="context-key" x-text="key + ':'"></span>
+                            <span x-text="Array.isArray(value) ? value.join(', ') : value"></span>
+                        </span>
+                    </template>
+                </div>
+
+                <!-- AI Explanation -->
+                <template x-if="alert.ai_explanation">
+                    <div class="alert-ai-explanation">
+                        <span class="field-label">AI Analysis</span>
+                        <p x-text="alert.ai_explanation"></p>
+                    </div>
+                </template>
+                <template x-if="!alert.ai_explanation">
+                    <button class="btn btn-sm btn-secondary"
+                            @click="explainAlert(alert.id)"
+                            :disabled="explaining === alert.id">
+                        <template x-if="explaining === alert.id"><span class="spinner"></span></template>
+                        AI Explain
+                    </button>
+                </template>
+
+                <!-- Matched Events -->
+                <div class="alert-events" x-show="alert.matched_events?.length > 0">
+                    <span class="text-muted">Matched events:</span>
+                    <span class="text-mono" x-text="alert.matched_events?.length + ' events'"></span>
+                </div>
+
+                <!-- Actions -->
+                <div class="alert-actions" x-show="alert.status !== 'resolved'">
+                    <button class="btn btn-sm btn-secondary"
+                            x-show="alert.status === 'new'"
+                            @click="updateStatus(alert.id, 'acknowledged')">
+                        Acknowledge
+                    </button>
+                    <button class="btn btn-sm btn-primary"
+                            @click="updateStatus(alert.id, 'resolved')">
+                        Resolve
+                    </button>
+                </div>
+            </div>
+        </template>
+    </div>
+
+    <!-- Pagination -->
+    <div class="pagination" x-show="total > 0">
+        <span class="pagination-info">
+            Showing <span x-text="((page-1)*size+1)"></span>-<span x-text="Math.min(page*size, total)"></span>
+            of <span x-text="total.toLocaleString()"></span> alerts
+        </span>
+        <div class="pagination-buttons">
+            <button class="btn btn-sm btn-secondary" @click="prevPage()" :disabled="page <= 1">Prev</button>
+            <button class="btn btn-sm btn-secondary" @click="nextPage()" :disabled="page * size >= total">Next</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function alertsPage() {
+    return {
+        alerts: [],
+        total: 0,
+        page: 1,
+        size: 50,
+        loading: true,
+        activeTab: '',
+        statusCounts: { new: 0, acknowledged: 0, resolved: 0 },
+        explaining: null,
+        filters: { severity: '', hours: '168' },
+
+        async fetchAlerts() {
+            this.loading = true;
+            const params = new URLSearchParams();
+            if (this.activeTab) params.set('status', this.activeTab);
+            if (this.filters.severity) params.set('severity', this.filters.severity);
+            params.set('hours', this.filters.hours);
+            params.set('page', this.page);
+            params.set('size', this.size);
+
+            try {
+                const resp = await fetch(`/api/v1/alerts?${params}`);
+                const data = await resp.json();
+                this.alerts = data.alerts || [];
+                this.total = data.total || 0;
+                this.statusCounts = data.status_counts || { new: 0, acknowledged: 0, resolved: 0 };
+            } catch (e) {
+                console.error('Failed to fetch alerts:', e);
+            }
+            this.loading = false;
+        },
+
+        async init() {
+            await this.fetchAlerts();
+            // Auto-refresh every 30s
+            setInterval(() => this.fetchAlerts(), 30000);
+        },
+
+        formatTime(ts) {
+            return new Date(ts).toLocaleString();
+        },
+
+        async updateStatus(alertId, newStatus) {
+            try {
+                const resp = await fetch(`/api/v1/alerts/${alertId}?new_status=${newStatus}`, {
+                    method: 'PATCH',
+                });
+                if (resp.ok) {
+                    await this.fetchAlerts();
+                }
+            } catch (e) {
+                console.error('Failed to update alert:', e);
+            }
+        },
+
+        async explainAlert(alertId) {
+            this.explaining = alertId;
+            try {
+                const resp = await fetch(`/api/v1/ai/explain/${alertId}`, { method: 'POST' });
+                if (resp.ok) {
+                    await this.fetchAlerts();
+                }
+            } catch (e) {
+                console.error('Failed to explain alert:', e);
+            }
+            this.explaining = null;
+        },
+
+        prevPage() {
+            if (this.page > 1) { this.page--; this.fetchAlerts(); }
+        },
+        nextPage() {
+            if (this.page * this.size < this.total) { this.page++; this.fetchAlerts(); }
+        },
+    };
+}
+</script>
+{% endblock %}
