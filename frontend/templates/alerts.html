@@ -26,7 +26,7 @@
     </div>
 
     <!-- Filters -->
-    <div class="filters mb-2">
+    <div class="filters mb-2" x-show="activeTab !== 'suppressions'">
         <div class="filter-group">
             <label>Severity</label>
             <select x-model="filters.severity" @change="fetchAlerts()">
@@ -49,11 +49,11 @@
     </div>
 
     <!-- Alert Cards -->
-    <template x-if="loading">
+    <template x-if="loading && activeTab !== 'suppressions'">
         <div class="empty-state"><p>Loading alerts...</p></div>
     </template>
 
-    <template x-if="!loading && alerts.length === 0">
+    <template x-if="!loading && alerts.length === 0 && activeTab !== 'suppressions'">
         <div class="empty-state">
             <div class="icon">&#9888;</div>
             <p>No alerts found</p>
@@ -198,7 +198,7 @@
             <template x-if="suppressions.length === 0">
                 <div class="empty-state">
                     <div class="icon">&#9881;</div>
-                    <p>No active suppressions</p>
+                    <p>No suppressions</p>
                     <p class="text-muted mt-1">Suppressions are created when you resolve alerts.</p>
                 </div>
             </template>
@@ -399,13 +399,11 @@ function alertsPage() {
 
         async fetchSuppressions() {
             try {
-                const resp = await fetch('/api/v1/suppressions?status=active');
-                const data = await resp.json();
-                this.suppressions = data.suppressions || [];
-                // Also fetch expired for display
-                const resp2 = await fetch('/api/v1/suppressions?status=expired');
-                const data2 = await resp2.json();
-                this.suppressions = [...this.suppressions, ...(data2.suppressions || [])];
+                const [data, data2] = await Promise.all([
+                    fetch('/api/v1/suppressions?status=active').then(r => r.json()),
+                    fetch('/api/v1/suppressions?status=expired').then(r => r.json()),
+                ]);
+                this.suppressions = [...(data.suppressions || []), ...(data2.suppressions || [])];
             } catch (e) {
                 console.error('Failed to fetch suppressions:', e);
             }
@@ -433,7 +431,10 @@ function alertsPage() {
                         ttl_hours: 168,
                     }),
                 });
-                if (resp.ok) await this.fetchSuppressions();
+                if (resp.ok) {
+                    await fetch(`/api/v1/suppressions/${sup.id}`, { method: 'DELETE' });
+                    await this.fetchSuppressions();
+                }
             } catch (e) {
                 console.error('Failed to renew suppression:', e);
             }
