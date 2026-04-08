@@ -344,7 +344,7 @@ function alertsPage() {
                     matchFields[f.key] = f.value;
                 });
                 body.suppression_fields = matchFields;
-                body.suppression_ttl_hours = parseInt(this.suppressionTTL) || null;
+                body.suppression_ttl_hours = this.suppressionTTL === '0' ? 0 : parseInt(this.suppressionTTL);
             }
 
             try {

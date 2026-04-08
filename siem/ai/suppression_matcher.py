@@ -1,3 +1,5 @@
+import asyncio
+
 import structlog
 
 from siem.ai.client import OllamaError, get_ollama_client
@@ -44,7 +46,10 @@ async def ai_match_suppression(
 
     try:
         client = get_ollama_client()
-        response = await client.generate(prompt, system=SYSTEM_PROMPT, temperature=0.1)
+        response = await asyncio.wait_for(
+            client.generate(prompt, system=SYSTEM_PROMPT, temperature=0.1),
+            timeout=10,
+        )
         result = parse_ai_match_response(response)
         logger.info(
             "ai_suppression_match",
