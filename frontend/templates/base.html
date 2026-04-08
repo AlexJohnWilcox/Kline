@@ -41,6 +41,10 @@
                 <span class="nav-icon">&#9881;</span>
                 <span class="nav-label" x-show="sidebarOpen">Rules</span>
             </a>
+            <a href="/settings" class="nav-item {% block nav_settings %}{% endblock %}">
+                <span class="nav-icon">&#9881;</span>
+                <span class="nav-label" x-show="sidebarOpen">Settings</span>
+            </a>
         </nav>
     </aside>
 
@@ -69,6 +73,7 @@
         </main>
     </div>
 
+    <script src="/static/js/walkthrough.js"></script>
     <script src="/static/js/app.js"></script>
     {% block scripts %}{% endblock %}
 </body>
