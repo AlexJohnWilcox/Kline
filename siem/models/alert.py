@@ -17,6 +17,7 @@ class Alert(BaseModel):
     matched_events: list[str] = []  # event IDs
     ai_explanation: str | None = None
     status: Literal["new", "acknowledged", "resolved"] = "new"
+    resolution_reason: str | None = None
     context: dict[str, Any] = {}  # extra info (username, IPs, counts)
 
     def to_es_doc(self) -> dict[str, Any]:

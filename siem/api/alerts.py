@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, Query
+from pydantic import BaseModel
 
 from siem.models.alert import Alert
 from siem.storage.es_client import get_es_client
@@ -88,19 +89,23 @@ async def get_alert(alert_id: str) -> dict:
     return Alert.from_es_hit(hits[0]).model_dump()
 
 
+class ResolveAlertRequest(BaseModel):
+    new_status: Literal["acknowledged", "resolved"]
+    reason: str | None = None
+    create_suppression: bool = False
+    suppression_fields: dict[str, str] | None = None
+    suppression_ttl_hours: int | None = None
+
+
 @router.patch("/{alert_id}")
-async def update_alert_status(
-    alert_id: str,
-    new_status: Literal["acknowledged", "resolved"],
-) -> dict:
-    """Update an alert's status (acknowledge or resolve)."""
+async def update_alert_status(alert_id: str, req: ResolveAlertRequest) -> dict:
+    """Update an alert's status. Optionally create a suppression when resolving."""
     es = await get_es_client()
 
     # Find the alert
     result = await es.search(
         index="siem-alerts-*",
-        body={"query": {"term": {"id": alert_id}}},
-        size=1,
+        body={"query": {"term": {"id": alert_id}}, "size": 1},
     )
     hits = result["hits"]["hits"]
     if not hits:
@@ -110,10 +115,31 @@ async def update_alert_status(
     index = hit["_index"]
     doc_id = hit["_id"]
 
-    await es.update(
-        index=index,
-        id=doc_id,
-        body={"doc": {"status": new_status}},
-    )
+    update_doc: dict[str, Any] = {"status": req.new_status}
+    if req.reason:
+        update_doc["resolution_reason"] = req.reason
 
-    return {"status": "ok", "alert_id": alert_id, "new_status": new_status}
+    await es.update(index=index, id=doc_id, body={"doc": update_doc})
+
+    # Create suppression if requested
+    suppression_id = None
+    if req.create_suppression and req.new_status == "resolved" and req.suppression_fields:
+        from siem.api.suppressions import create_suppression, CreateSuppressionRequest
+
+        alert = Alert.from_es_hit(hit)
+        sup_req = CreateSuppressionRequest(
+            rule_id=alert.rule_id,
+            reason=req.reason or "No reason provided",
+            match_fields=req.suppression_fields,
+            source_alert_id=alert_id,
+            ttl_hours=req.suppression_ttl_hours,
+        )
+        sup_result = await create_suppression(sup_req)
+        suppression_id = sup_result.get("id")
+
+    return {
+        "status": "ok",
+        "alert_id": alert_id,
+        "new_status": req.new_status,
+        "suppression_id": suppression_id,
+    }
