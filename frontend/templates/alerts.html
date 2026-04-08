@@ -20,6 +20,9 @@
         <button class="tab" :class="{ active: activeTab === 'resolved' }" @click="activeTab = 'resolved'; fetchAlerts()">
             Resolved <span class="tab-count" x-show="statusCounts.resolved > 0" x-text="statusCounts.resolved"></span>
         </button>
+        <button class="tab" :class="{ active: activeTab === 'suppressions' }" @click="activeTab = 'suppressions'; fetchSuppressions()">
+            Suppressions
+        </button>
     </div>
 
     <!-- Filters -->
@@ -189,6 +192,59 @@
         </template>
     </div>
 
+    <!-- Suppressions List -->
+    <template x-if="activeTab === 'suppressions'">
+        <div>
+            <template x-if="suppressions.length === 0">
+                <div class="empty-state">
+                    <div class="icon">&#9881;</div>
+                    <p>No active suppressions</p>
+                    <p class="text-muted mt-1">Suppressions are created when you resolve alerts.</p>
+                </div>
+            </template>
+            <div class="alert-list">
+                <template x-for="sup in suppressions" :key="sup.id">
+                    <div class="suppression-card" :class="{ 'suppression-expired': sup.status === 'expired' }">
+                        <div class="suppression-card-header">
+                            <div class="alert-card-left">
+                                <span class="badge badge-info" x-text="sup.rule_id"></span>
+                                <span class="badge" :class="sup.status === 'active' ? 'badge-success' : 'badge-muted'"
+                                      x-text="sup.status"></span>
+                            </div>
+                            <div class="alert-card-right">
+                                <button class="btn btn-sm btn-secondary"
+                                        x-show="sup.status === 'expired'"
+                                        @click="renewSuppression(sup)">
+                                    Renew
+                                </button>
+                                <button class="btn btn-sm btn-secondary" style="color:var(--danger);"
+                                        x-show="sup.status === 'active'"
+                                        @click="deleteSuppression(sup.id)">
+                                    Delete
+                                </button>
+                            </div>
+                        </div>
+                        <p class="suppression-reason" x-text="'\"' + sup.reason + '\"'"></p>
+                        <div class="suppression-fields">
+                            <template x-for="(val, key) in sup.match_fields" :key="key">
+                                <span class="suppression-field-tag" x-text="key + ': ' + val"></span>
+                            </template>
+                        </div>
+                        <div class="suppression-dates">
+                            Created: <span x-text="formatTime(sup.created_at)"></span>
+                            <template x-if="sup.expires_at">
+                                <span> &middot; Expires: <span x-text="formatTime(sup.expires_at)"></span></span>
+                            </template>
+                            <template x-if="!sup.expires_at">
+                                <span> &middot; Permanent</span>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </template>
+
     <!-- Pagination -->
     <div class="pagination" x-show="total > 0">
         <span class="pagination-info">
@@ -222,6 +278,7 @@ function alertsPage() {
         createSuppression: true,
         resolveFields: [],
         suppressionTTL: '168',
+        suppressions: [],
 
         async fetchAlerts() {
             this.loading = true;
@@ -338,6 +395,48 @@ function alertsPage() {
         },
         nextPage() {
             if (this.page * this.size < this.total) { this.page++; this.fetchAlerts(); }
+        },
+
+        async fetchSuppressions() {
+            try {
+                const resp = await fetch('/api/v1/suppressions?status=active');
+                const data = await resp.json();
+                this.suppressions = data.suppressions || [];
+                // Also fetch expired for display
+                const resp2 = await fetch('/api/v1/suppressions?status=expired');
+                const data2 = await resp2.json();
+                this.suppressions = [...this.suppressions, ...(data2.suppressions || [])];
+            } catch (e) {
+                console.error('Failed to fetch suppressions:', e);
+            }
+        },
+
+        async deleteSuppression(supId) {
+            try {
+                const resp = await fetch(`/api/v1/suppressions/${supId}`, { method: 'DELETE' });
+                if (resp.ok) await this.fetchSuppressions();
+            } catch (e) {
+                console.error('Failed to delete suppression:', e);
+            }
+        },
+
+        async renewSuppression(sup) {
+            try {
+                const resp = await fetch('/api/v1/suppressions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        rule_id: sup.rule_id,
+                        reason: sup.reason,
+                        match_fields: sup.match_fields,
+                        source_alert_id: sup.source_alert_id,
+                        ttl_hours: 168,
+                    }),
+                });
+                if (resp.ok) await this.fetchSuppressions();
+            } catch (e) {
+                console.error('Failed to renew suppression:', e);
+            }
         },
     };
 }

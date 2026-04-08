@@ -1062,3 +1062,57 @@ select:focus, input:focus {
     gap: 8px;
     justify-content: flex-end;
 }
+
+/* ========== Suppression Cards ========== */
+.suppression-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+}
+
+.suppression-card.suppression-expired {
+    opacity: 0.5;
+    border-left-color: var(--text-dim);
+}
+
+.suppression-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.suppression-reason {
+    font-size: 13px;
+    color: var(--text-muted);
+    font-style: italic;
+    margin-bottom: 8px;
+    line-height: 1.6;
+}
+
+.suppression-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+.suppression-field-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: var(--accent);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.suppression-dates {
+    font-size: 12px;
+    color: var(--text-dim);
+}
