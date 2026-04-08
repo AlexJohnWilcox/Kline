@@ -1,4 +1,5 @@
 from siem.collectors.syslog import parse_syslog_line
+from siem.models.alert import Alert
 from siem.models.event import EventCategory, EventSeverity
 
 
@@ -192,3 +193,29 @@ def test_suppression_is_expired():
         expires_at=None,
     )
     assert s3.is_expired() is False
+
+
+def test_alert_resolution_reason_in_es_doc():
+    alert = Alert(
+        rule_id="test",
+        rule_name="Test",
+        severity=EventSeverity.MEDIUM,
+        description="test alert",
+        status="resolved",
+        resolution_reason="just testing",
+    )
+    doc = alert.to_es_doc()
+    assert doc["resolution_reason"] == "just testing"
+    assert doc["status"] == "resolved"
+
+
+def test_alert_resolution_reason_default_none():
+    alert = Alert(
+        rule_id="test",
+        rule_name="Test",
+        severity=EventSeverity.MEDIUM,
+        description="test alert",
+    )
+    assert alert.resolution_reason is None
+    doc = alert.to_es_doc()
+    assert doc["resolution_reason"] is None
