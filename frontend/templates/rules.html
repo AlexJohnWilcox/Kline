@@ -1,11 +1,136 @@
 {% extends "base.html" %}
-{% block title %}SIEM - Rules{% endblock %}
+{% block title %}Krungle - Rules{% endblock %}
 {% block nav_rules %}active{% endblock %}
 {% block page_title %}Detection Rules{% endblock %}
 
 {% block content %}
 <div x-data="rulesPage()">
 
+    <!-- Action bar -->
+    <div class="filters mb-2">
+        <button class="btn btn-primary" @click="showForm = true; resetForm()">+ New Rule</button>
+    </div>
+
+    <!-- Create/Edit Form -->
+    <template x-if="showForm">
+        <div class="card mb-2" style="border-left: 3px solid var(--accent);">
+            <div class="card-header">
+                <span class="card-title" x-text="editing ? 'Edit Rule' : 'New Rule'"></span>
+                <button class="btn btn-sm btn-secondary" @click="showForm = false">Cancel</button>
+            </div>
+            <form @submit.prevent="saveRule()" class="rule-form">
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>Rule ID</label>
+                        <input type="text" x-model="form.id" :disabled="editing" required
+                               placeholder="e.g. brute-force-ssh" pattern="[a-z0-9\-]+"
+                               title="Lowercase letters, numbers, and hyphens only">
+                    </div>
+                    <div class="form-group">
+                        <label>Name</label>
+                        <input type="text" x-model="form.name" required placeholder="SSH Brute Force Attempt">
+                    </div>
+                    <div class="form-group">
+                        <label>Severity</label>
+                        <select x-model="form.severity" required>
+                            <option value="low">Low</option>
+                            <option value="medium">Medium</option>
+                            <option value="high">High</option>
+                            <option value="critical">Critical</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Source (optional)</label>
+                        <select x-model="form.source">
+                            <option value="">Any</option>
+                            <option value="syslog">Syslog</option>
+                            <option value="docker">Docker</option>
+                            <option value="network">Network</option>
+                            <option value="file">File</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Category (optional)</label>
+                        <select x-model="form.category">
+                            <option value="">Any</option>
+                            <option value="auth">Auth</option>
+                            <option value="network">Network</option>
+                            <option value="system">System</option>
+                            <option value="application">Application</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Threshold</label>
+                        <input type="number" x-model.number="form.threshold" min="1" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Window (seconds)</label>
+                        <input type="number" x-model.number="form.window_seconds" min="10" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Enabled</label>
+                        <select x-model="form.enabled">
+                            <option :value="true">Yes</option>
+                            <option :value="false">No</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group" style="margin-top: 12px;">
+                    <label>Description</label>
+                    <input type="text" x-model="form.description" required
+                           placeholder="Multiple failed SSH logins from same IP within 5 minutes"
+                           style="width: 100%;">
+                </div>
+                <div class="form-group" style="margin-top: 12px;">
+                    <label>Tags (comma-separated)</label>
+                    <input type="text" x-model="form.tagsStr" placeholder="brute-force, ssh" style="width: 100%;">
+                </div>
+
+                <!-- Conditions -->
+                <div style="margin-top: 16px;">
+                    <div class="flex items-center gap-1 mb-1">
+                        <span class="field-label">Conditions</span>
+                        <button type="button" class="btn btn-sm btn-secondary" @click="addCondition()">+ Add</button>
+                    </div>
+                    <template x-for="(cond, i) in form.conditions" :key="i">
+                        <div class="condition-row">
+                            <input type="text" x-model="cond.field" placeholder="field (e.g. action)" required>
+                            <select x-model="cond.operator" required>
+                                <option value="eq">eq</option>
+                                <option value="contains">contains</option>
+                                <option value="gt">gt</option>
+                                <option value="lt">lt</option>
+                                <option value="gte">gte</option>
+                                <option value="lte">lte</option>
+                                <option value="regex">regex</option>
+                                <option value="exists">exists</option>
+                            </select>
+                            <input type="text" x-model="cond.value" placeholder="value"
+                                   :disabled="cond.operator === 'exists'">
+                            <button type="button" class="btn btn-sm btn-secondary"
+                                    @click="form.conditions.splice(i, 1)"
+                                    :disabled="form.conditions.length <= 1">&#10005;</button>
+                        </div>
+                    </template>
+                </div>
+
+                <!-- Error message -->
+                <template x-if="formError">
+                    <p class="text-danger mt-1" x-text="formError"></p>
+                </template>
+
+                <div style="margin-top: 16px; display: flex; gap: 8px;">
+                    <button type="submit" class="btn btn-primary" :disabled="saving">
+                        <template x-if="saving"><span class="spinner"></span></template>
+                        <span x-text="editing ? 'Update Rule' : 'Create Rule'"></span>
+                    </button>
+                    <button type="button" class="btn btn-secondary" @click="showForm = false">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </template>
+
+    <!-- Loading state -->
     <template x-if="loading">
         <div class="empty-state"><p>Loading rules...</p></div>
     </template>
@@ -14,7 +139,7 @@
         <div class="empty-state">
             <div class="icon">&#9881;</div>
             <p>No detection rules loaded</p>
-            <p class="text-muted mt-1">Add YAML rule files to the <code>rules/</code> directory.</p>
+            <p class="text-muted mt-1">Add YAML rule files to the <code>rules/</code> directory or click "New Rule" above.</p>
         </div>
     </template>
 
@@ -29,6 +154,9 @@
                         <span class="alert-rule-name" x-text="rule.name"></span>
                     </div>
                     <div class="alert-card-right">
+                        <button class="btn btn-sm btn-secondary" @click="editRule(rule)">Edit</button>
+                        <button class="btn btn-sm btn-secondary" style="color: var(--danger);"
+                                @click="deleteRule(rule.id, rule.name)">Delete</button>
                         <span class="text-muted text-mono" x-text="rule.id"></span>
                     </div>
                 </div>
@@ -58,7 +186,7 @@
                     <div class="conditions-list">
                         <template x-for="(cond, i) in rule.conditions" :key="i">
                             <code class="condition-chip"
-                                  x-text="cond.field + ' ' + cond.operator + (cond.value !== null ? ' ' + cond.value : '')">
+                                  x-text="cond.field + ' ' + cond.operator + (cond.value !== null && cond.value !== undefined ? ' ' + cond.value : '')">
                             </code>
                         </template>
                     </div>
@@ -104,8 +232,22 @@ function rulesPage() {
     return {
         rules: [],
         loading: true,
+        showForm: false,
+        editing: false,
+        saving: false,
+        formError: null,
+        form: {
+            id: '', name: '', description: '', severity: 'medium',
+            enabled: true, source: '', category: '',
+            conditions: [{ field: '', operator: 'eq', value: '' }],
+            threshold: 1, window_seconds: 300, tagsStr: '',
+        },
 
         async init() {
+            await this.fetchRules();
+        },
+
+        async fetchRules() {
             try {
                 const resp = await fetch('/api/v1/rules');
                 const data = await resp.json();
@@ -114,6 +256,119 @@ function rulesPage() {
                 console.error('Failed to fetch rules:', e);
             }
             this.loading = false;
+        },
+
+        resetForm() {
+            this.editing = false;
+            this.formError = null;
+            this.form = {
+                id: '', name: '', description: '', severity: 'medium',
+                enabled: true, source: '', category: '',
+                conditions: [{ field: '', operator: 'eq', value: '' }],
+                threshold: 1, window_seconds: 300, tagsStr: '',
+            };
+        },
+
+        editRule(rule) {
+            this.editing = true;
+            this.formError = null;
+            this.showForm = true;
+            this.form = {
+                id: rule.id,
+                name: rule.name,
+                description: rule.description,
+                severity: rule.severity,
+                enabled: rule.enabled,
+                source: rule.source || '',
+                category: rule.category || '',
+                conditions: rule.conditions.map(c => ({ ...c, value: c.value ?? '' })),
+                threshold: rule.threshold,
+                window_seconds: rule.window_seconds,
+                tagsStr: (rule.tags || []).join(', '),
+            };
+        },
+
+        addCondition() {
+            this.form.conditions.push({ field: '', operator: 'eq', value: '' });
+        },
+
+        async saveRule() {
+            this.saving = true;
+            this.formError = null;
+
+            const tags = this.form.tagsStr
+                ? this.form.tagsStr.split(',').map(t => t.trim()).filter(Boolean)
+                : [];
+
+            const conditions = this.form.conditions.map(c => {
+                const cond = { field: c.field, operator: c.operator };
+                if (c.operator !== 'exists' && c.value !== '') {
+                    // Try to parse as number or boolean
+                    const v = c.value;
+                    if (v === 'true') cond.value = true;
+                    else if (v === 'false') cond.value = false;
+                    else if (!isNaN(v) && v !== '') cond.value = Number(v);
+                    else cond.value = v;
+                }
+                return cond;
+            });
+
+            const body = {
+                id: this.form.id,
+                name: this.form.name,
+                description: this.form.description,
+                severity: this.form.severity,
+                enabled: this.form.enabled === true || this.form.enabled === 'true',
+                source: this.form.source || null,
+                category: this.form.category || null,
+                conditions,
+                threshold: this.form.threshold,
+                window_seconds: this.form.window_seconds,
+                tags,
+            };
+
+            try {
+                let resp;
+                if (this.editing) {
+                    resp = await fetch(`/api/v1/rules/${this.form.id}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                    });
+                } else {
+                    resp = await fetch('/api/v1/rules', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                    });
+                }
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    this.formError = err.detail || `HTTP ${resp.status}`;
+                } else {
+                    this.showForm = false;
+                    await this.fetchRules();
+                }
+            } catch (e) {
+                this.formError = 'Request failed: ' + e.message;
+            }
+            this.saving = false;
+        },
+
+        async deleteRule(ruleId, ruleName) {
+            if (!confirm(`Delete rule "${ruleName}"?`)) return;
+            try {
+                const resp = await fetch(`/api/v1/rules/${ruleId}`, { method: 'DELETE' });
+                if (resp.ok) {
+                    await this.fetchRules();
+                } else {
+                    const err = await resp.json();
+                    alert(err.detail || 'Failed to delete rule');
+                }
+            } catch (e) {
+                alert('Failed to delete rule: ' + e.message);
+            }
         },
     };
 }

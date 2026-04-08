@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}SIEM{% endblock %}</title>
+    <title>{% block title %}Krungle{% endblock %}</title>
     <link rel="stylesheet" href="/static/css/app.css">
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <script defer src="https://unpkg.com/alpinejs@3.14.8/dist/cdn.min.js"></script>
@@ -15,7 +15,7 @@
     <!-- Sidebar -->
     <aside class="sidebar" :class="{ 'collapsed': !sidebarOpen }">
         <div class="sidebar-header">
-            <span class="logo" x-show="sidebarOpen">SIEM</span>
+            <span class="logo" x-show="sidebarOpen">Krungle</span>
             <button class="sidebar-toggle" @click="sidebarOpen = !sidebarOpen">
                 <span x-text="sidebarOpen ? '&#9664;' : '&#9654;'"></span>
             </button>

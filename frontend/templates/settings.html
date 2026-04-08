@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% block title %}Krungle - Settings{% endblock %}
+{% block nav_settings %}active{% endblock %}
+{% block page_title %}Settings{% endblock %}
+
+{% block content %}
+<div x-data="settingsPage()">
+
+    <template x-if="loading">
+        <div class="empty-state"><p>Loading settings...</p></div>
+    </template>
+
+    <template x-if="!loading">
+        <div>
+            <!-- Connection Info (read-only) -->
+            <div class="card mb-2">
+                <div class="card-header">
+                    <span class="card-title">Connection</span>
+                </div>
+                <div class="settings-grid">
+                    <div class="form-group">
+                        <label>Elasticsearch URL</label>
+                        <input type="text" :value="s.es_url" disabled>
+                    </div>
+                    <div class="form-group">
+                        <label>Ollama URL</label>
+                        <input type="text" :value="s.ollama_url" disabled>
+                    </div>
+                </div>
+                <p class="text-muted mt-1" style="font-size: 12px;">Connection URLs are set in the .env file and require a restart to change.</p>
+            </div>
+
+            <!-- AI Settings -->
+            <div class="card mb-2">
+                <div class="card-header">
+                    <span class="card-title">AI / Ollama</span>
+                </div>
+                <div class="settings-grid">
+                    <div class="form-group">
+                        <label>Model</label>
+                        <input type="text" x-model="s.ollama_model" placeholder="llama3.2">
+                    </div>
+                    <div class="form-group">
+                        <label>Timeout (seconds)</label>
+                        <input type="number" x-model.number="s.ollama_timeout" min="10" max="600">
+                    </div>
+                    <div class="form-group">
+                        <label>Temperature</label>
+                        <input type="number" x-model.number="s.ollama_temperature" min="0" max="2" step="0.1">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Detection Settings -->
+            <div class="card mb-2">
+                <div class="card-header">
+                    <span class="card-title">Detection Engine</span>
+                </div>
+                <div class="settings-grid">
+                    <div class="form-group">
+                        <label>Check Interval (seconds)</label>
+                        <input type="number" x-model.number="s.detection_interval_seconds" min="5" max="600">
+                    </div>
+                    <div class="form-group">
+                        <label>Alert Cooldown (minutes)</label>
+                        <input type="number" x-model.number="s.detection_cooldown_minutes" min="1" max="1440">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Retention Settings -->
+            <div class="card mb-2">
+                <div class="card-header">
+                    <span class="card-title">Data Retention</span>
+                </div>
+                <div class="settings-grid">
+                    <div class="form-group">
+                        <label>Event Retention (days)</label>
+                        <input type="number" x-model.number="s.event_retention_days" min="1" max="3650">
+                    </div>
+                    <div class="form-group">
+                        <label>Alert Retention (days)</label>
+                        <input type="number" x-model.number="s.alert_retention_days" min="1" max="3650">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Log Level -->
+            <div class="card mb-2">
+                <div class="card-header">
+                    <span class="card-title">Logging</span>
+                </div>
+                <div class="settings-grid">
+                    <div class="form-group">
+                        <label>Log Level</label>
+                        <select x-model="s.log_level">
+                            <option value="debug">Debug</option>
+                            <option value="info">Info</option>
+                            <option value="warning">Warning</option>
+                            <option value="error">Error</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Save -->
+            <template x-if="saveMsg">
+                <p class="text-success mb-1" x-text="saveMsg"></p>
+            </template>
+            <template x-if="saveError">
+                <p class="text-danger mb-1" x-text="saveError"></p>
+            </template>
+            <button class="btn btn-primary" @click="save()" :disabled="saving">
+                <template x-if="saving"><span class="spinner"></span></template>
+                Save Settings
+            </button>
+        </div>
+    </template>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function settingsPage() {
+    return {
+        s: {},
+        original: {},
+        loading: true,
+        saving: false,
+        saveMsg: null,
+        saveError: null,
+
+        async init() {
+            try {
+                const resp = await fetch('/api/v1/settings');
+                this.s = await resp.json();
+                this.original = { ...this.s };
+            } catch (e) {
+                console.error('Failed to fetch settings:', e);
+            }
+            this.loading = false;
+        },
+
+        async save() {
+            this.saving = true;
+            this.saveMsg = null;
+            this.saveError = null;
+
+            // Only send changed fields
+            const changes = {};
+            for (const key of Object.keys(this.original)) {
+                if (key === 'es_url' || key === 'ollama_url') continue;
+                if (this.s[key] !== this.original[key]) {
+                    changes[key] = this.s[key];
+                }
+            }
+
+            if (Object.keys(changes).length === 0) {
+                this.saveMsg = 'No changes to save.';
+                this.saving = false;
+                return;
+            }
+
+            try {
+                const resp = await fetch('/api/v1/settings', {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(changes),
+                });
+                if (resp.ok) {
+                    this.original = { ...this.s };
+                    this.saveMsg = 'Settings saved successfully.';
+                } else {
+                    const err = await resp.json();
+                    this.saveError = err.detail || 'Failed to save settings.';
+                }
+            } catch (e) {
+                this.saveError = 'Failed to save: ' + e.message;
+            }
+            this.saving = false;
+        },
+    };
+}
+</script>
+{% endblock %}

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}SIEM - Dashboard{% endblock %}
+{% block title %}Krungle - Dashboard{% endblock %}
 {% block nav_dashboard %}active{% endblock %}
 {% block page_title %}Dashboard{% endblock %}
 
@@ -27,6 +27,19 @@
             <div class="stat-label">Top Host</div>
             <div class="stat-value" style="font-size:18px;" x-text="topHost"></div>
             <div class="stat-sub" x-text="topHostCount + ' events'"></div>
+        </div>
+    </div>
+
+    <!-- Collector Status -->
+    <div class="card mb-2">
+        <div class="card-header">
+            <span class="card-title">Collectors</span>
+        </div>
+        <div id="collector-status"
+             hx-get="/partials/collector-status"
+             hx-trigger="load, every 10s"
+             hx-swap="innerHTML">
+            <p class="text-muted">Loading...</p>
         </div>
     </div>
 

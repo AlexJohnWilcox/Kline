@@ -77,8 +77,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="SIEM",
-    description="Local SIEM with AI-powered log analysis",
+    title="Krungle",
+    description="AI-powered SIEM for local log analysis",
     version="0.1.0",
     lifespan=lifespan,
 )
