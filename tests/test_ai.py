@@ -159,3 +159,30 @@ async def test_auto_explain_ollama_down():
         )
         result = await auto_explain_alert(alert)
         assert result is None
+
+
+# ── Suppression Matcher ──
+
+
+def test_parse_ai_match_yes():
+    from siem.ai.suppression_matcher import parse_ai_match_response
+
+    assert parse_ai_match_response("YES - this is the same testing activity") is True
+    assert parse_ai_match_response("Yes, it matches") is True
+    assert parse_ai_match_response("yes") is True
+
+
+def test_parse_ai_match_no():
+    from siem.ai.suppression_matcher import parse_ai_match_response
+
+    assert parse_ai_match_response("NO - different user and context") is False
+    assert parse_ai_match_response("No, this is a different situation") is False
+    assert parse_ai_match_response("no") is False
+
+
+def test_parse_ai_match_ambiguous():
+    from siem.ai.suppression_matcher import parse_ai_match_response
+
+    assert parse_ai_match_response("I'm not sure about this one") is False
+    assert parse_ai_match_response("Maybe, it could be related") is False
+    assert parse_ai_match_response("") is False
