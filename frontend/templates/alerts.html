@@ -110,17 +110,81 @@
                 </div>
 
                 <!-- Actions -->
-                <div class="alert-actions" x-show="alert.status !== 'resolved'">
+                <div class="alert-actions" x-show="alert.status !== 'resolved' && resolvingAlert !== alert.id">
                     <button class="btn btn-sm btn-secondary"
                             x-show="alert.status === 'new'"
                             @click="updateStatus(alert.id, 'acknowledged')">
                         Acknowledge
                     </button>
                     <button class="btn btn-sm btn-primary"
-                            @click="updateStatus(alert.id, 'resolved')">
+                            @click="showResolveForm(alert)">
                         Resolve
                     </button>
                 </div>
+
+                <!-- Resolve Form (inline) -->
+                <template x-if="resolvingAlert === alert.id">
+                    <div class="resolve-form">
+                        <div class="form-title">Resolve Alert</div>
+
+                        <div class="form-group mb-1">
+                            <label>Reason</label>
+                            <input type="text" x-model="resolveReason" placeholder="Why is this expected?"
+                                   style="width:100%;">
+                        </div>
+
+                        <div class="form-group mb-1">
+                            <label style="display:flex;align-items:center;gap:6px;">
+                                <input type="checkbox" x-model="createSuppression">
+                                Create suppression rule
+                            </label>
+                        </div>
+
+                        <template x-if="createSuppression">
+                            <div>
+                                <label class="field-label">Match on:</label>
+                                <div class="field-checks">
+                                    <div class="field-check disabled">
+                                        <input type="checkbox" checked disabled>
+                                        <span>rule: <span x-text="alert.rule_id"></span></span>
+                                    </div>
+                                    <template x-for="field in resolveFields" :key="field.key">
+                                        <div class="field-check">
+                                            <input type="checkbox" x-model="field.checked">
+                                            <span x-text="field.key + ': ' + field.value"></span>
+                                        </div>
+                                    </template>
+                                </div>
+
+                                <div class="form-group mb-1">
+                                    <label>Expires</label>
+                                    <select x-model="suppressionTTL">
+                                        <option value="1">1 hour</option>
+                                        <option value="12">12 hours</option>
+                                        <option value="24">1 day</option>
+                                        <option value="168" selected>7 days</option>
+                                        <option value="720">30 days</option>
+                                        <option value="0">Permanent</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </template>
+
+                        <div class="form-actions">
+                            <button class="btn btn-sm btn-secondary" @click="resolvingAlert = null">Cancel</button>
+                            <button class="btn btn-sm btn-primary" @click="submitResolve(alert)"
+                                    :disabled="!resolveReason.trim()">Resolve</button>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- Show reason on resolved alerts -->
+                <template x-if="alert.status === 'resolved' && alert.resolution_reason">
+                    <div class="mt-1">
+                        <span class="field-label">Reason:</span>
+                        <span class="text-muted" x-text="alert.resolution_reason"></span>
+                    </div>
+                </template>
             </div>
         </template>
     </div>
@@ -152,6 +216,12 @@ function alertsPage() {
         statusCounts: { new: 0, acknowledged: 0, resolved: 0 },
         explaining: null,
         filters: { severity: '', hours: '168' },
+        // Resolve form state
+        resolvingAlert: null,
+        resolveReason: '',
+        createSuppression: true,
+        resolveFields: [],
+        suppressionTTL: '168',
 
         async fetchAlerts() {
             this.loading = true;
@@ -176,7 +246,6 @@ function alertsPage() {
 
         async init() {
             await this.fetchAlerts();
-            // Auto-refresh every 30s
             setInterval(() => this.fetchAlerts(), 30000);
         },
 
@@ -184,10 +253,64 @@ function alertsPage() {
             return new Date(ts).toLocaleString();
         },
 
+        showResolveForm(alert) {
+            this.resolvingAlert = alert.id;
+            this.resolveReason = '';
+            this.createSuppression = true;
+            this.suppressionTTL = '168';
+
+            // Build field list from alert context
+            const fields = [];
+            const ctx = alert.context || {};
+            if (ctx.users) {
+                ctx.users.forEach(u => fields.push({ key: 'user', value: u, checked: true }));
+            }
+            if (ctx.source_ips) {
+                ctx.source_ips.forEach(ip => fields.push({ key: 'source_ip', value: ip, checked: true }));
+            }
+            if (ctx.hosts) {
+                ctx.hosts.forEach(h => fields.push({ key: 'host', value: h, checked: false }));
+            }
+            this.resolveFields = fields;
+        },
+
+        async submitResolve(alert) {
+            const body = {
+                new_status: 'resolved',
+                reason: this.resolveReason,
+                create_suppression: this.createSuppression,
+            };
+
+            if (this.createSuppression) {
+                const matchFields = {};
+                this.resolveFields.filter(f => f.checked).forEach(f => {
+                    matchFields[f.key] = f.value;
+                });
+                body.suppression_fields = matchFields;
+                body.suppression_ttl_hours = parseInt(this.suppressionTTL) || null;
+            }
+
+            try {
+                const resp = await fetch(`/api/v1/alerts/${alert.id}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                if (resp.ok) {
+                    this.resolvingAlert = null;
+                    await this.fetchAlerts();
+                }
+            } catch (e) {
+                console.error('Failed to resolve alert:', e);
+            }
+        },
+
         async updateStatus(alertId, newStatus) {
             try {
-                const resp = await fetch(`/api/v1/alerts/${alertId}?new_status=${newStatus}`, {
+                const resp = await fetch(`/api/v1/alerts/${alertId}`, {
                     method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ new_status: newStatus }),
                 });
                 if (resp.ok) {
                     await this.fetchAlerts();
