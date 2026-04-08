@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     # Detection
     detection_interval_seconds: int = 30
     detection_cooldown_minutes: int = 15
+    default_suppression_ttl_hours: int = 168  # 7 days
 
     # Retention
     event_retention_days: int = 90

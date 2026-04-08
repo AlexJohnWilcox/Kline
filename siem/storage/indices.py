@@ -52,6 +52,28 @@ ALERT_INDEX_TEMPLATE = {
     },
 }
 
+SUPPRESSION_INDEX_TEMPLATE = {
+    "index_patterns": ["siem-suppressions"],
+    "template": {
+        "settings": {
+            "number_of_shards": 1,
+            "number_of_replicas": 0,
+        },
+        "mappings": {
+            "properties": {
+                "id": {"type": "keyword"},
+                "created_at": {"type": "date"},
+                "expires_at": {"type": "date"},
+                "rule_id": {"type": "keyword"},
+                "reason": {"type": "text"},
+                "match_fields": {"type": "object", "dynamic": True},
+                "source_alert_id": {"type": "keyword"},
+                "status": {"type": "keyword"},
+            }
+        },
+    },
+}
+
 
 def get_event_index() -> str:
     """Get the current month's event index name."""
@@ -76,3 +98,9 @@ async def setup_indices(es: AsyncElasticsearch) -> None:
         body=ALERT_INDEX_TEMPLATE,
     )
     logger.info("index_template_created", name="siem-alerts")
+
+    await es.indices.put_index_template(
+        name="siem-suppressions",
+        body=SUPPRESSION_INDEX_TEMPLATE,
+    )
+    logger.info("index_template_created", name="siem-suppressions")
