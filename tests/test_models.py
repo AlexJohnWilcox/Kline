@@ -56,7 +56,7 @@ def test_event_to_es_doc(sample_syslog_lines):
     assert isinstance(doc["timestamp"], str)
 
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from siem.models.suppression import Suppression
 
 
@@ -219,3 +219,29 @@ def test_alert_resolution_reason_default_none():
     assert alert.resolution_reason is None
     doc = alert.to_es_doc()
     assert doc["resolution_reason"] is None
+
+
+def test_suppression_permanent_no_expiry():
+    """Permanent suppressions have no expires_at."""
+    s = Suppression(
+        rule_id="test",
+        reason="permanent exception",
+        match_fields={"user": "admin"},
+        source_alert_id="x",
+        expires_at=None,
+    )
+    assert s.is_expired() is False
+    doc = s.to_es_doc()
+    assert doc["expires_at"] is None
+
+
+def test_suppression_empty_match_fields():
+    """Suppression with no match fields matches any context for that rule."""
+    s = Suppression(
+        rule_id="test",
+        reason="suppress all",
+        match_fields={},
+        source_alert_id="x",
+    )
+    assert s.matches_context({"users": ["anyone"], "hosts": ["any"]}) is True
+    assert s.matches_context({}) is True
