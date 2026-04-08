@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 import structlog
@@ -15,12 +16,14 @@ from siem.ai.client import close_ollama_client, get_ollama_client
 from siem.storage.es_client import close_es_client, get_es_client
 from siem.storage.indices import setup_indices
 from siem.tasks.collector_runner import CollectorRunner
+from siem.tasks.retention import retention_loop
 
 logger = structlog.get_logger()
 
 # Global collector runner and detection engine (accessible from API routes)
 collector_runner = CollectorRunner()
 detection_engine = DetectionEngine()
+_retention_task: asyncio.Task | None = None
 
 # Templates
 templates = Jinja2Templates(directory=str(settings.templates_dir))
@@ -44,6 +47,10 @@ async def lifespan(app: FastAPI):
     # Start detection engine
     await detection_engine.start()
 
+    # Start retention job
+    global _retention_task
+    _retention_task = asyncio.create_task(retention_loop())
+
     # Check Ollama connectivity
     ollama = get_ollama_client()
     if await ollama.is_available():
@@ -56,6 +63,12 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    if _retention_task:
+        _retention_task.cancel()
+        try:
+            await _retention_task
+        except asyncio.CancelledError:
+            pass
     await detection_engine.stop()
     await collector_runner.stop()
     await close_ollama_client()
@@ -79,24 +92,18 @@ from siem.api.alerts import router as alerts_router
 from siem.api.events import router as events_router
 from siem.api.dashboard import router as dashboard_router
 from siem.api.health import router as health_router
+from siem.api.rules import router as rules_router
+from siem.api.settings import router as settings_router
+from siem.api.suppressions import router as suppressions_router
 
 app.include_router(ai_router)
 app.include_router(alerts_router)
 app.include_router(events_router)
 app.include_router(dashboard_router)
 app.include_router(health_router)
-
-
-# ── Rules API (reads from detection engine) ──
-
-
-@app.get("/api/v1/rules")
-async def list_rules() -> dict:
-    rules = detection_engine.rules
-    return {
-        "rules": [r.model_dump() for r in rules.values()],
-        "count": len(rules),
-    }
+app.include_router(rules_router)
+app.include_router(settings_router)
+app.include_router(suppressions_router)
 
 
 # ── Page routes (serve Jinja2 templates) ──
@@ -104,27 +111,40 @@ async def list_rules() -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 async def page_dashboard(request: Request):
-    return templates.TemplateResponse("dashboard.html", {"request": request})
+    return templates.TemplateResponse(request, "dashboard.html")
 
 
 @app.get("/events", response_class=HTMLResponse)
 async def page_events(request: Request):
-    return templates.TemplateResponse("events.html", {"request": request})
+    return templates.TemplateResponse(request, "events.html")
 
 
 @app.get("/alerts", response_class=HTMLResponse)
 async def page_alerts(request: Request):
-    return templates.TemplateResponse("alerts.html", {"request": request})
+    return templates.TemplateResponse(request, "alerts.html")
 
 
 @app.get("/search", response_class=HTMLResponse)
 async def page_search(request: Request):
-    return templates.TemplateResponse("search.html", {"request": request})
+    return templates.TemplateResponse(request, "search.html")
 
 
 @app.get("/rules", response_class=HTMLResponse)
 async def page_rules(request: Request):
-    return templates.TemplateResponse("rules.html", {"request": request})
+    return templates.TemplateResponse(request, "rules.html")
+
+
+@app.get("/settings", response_class=HTMLResponse)
+async def page_settings(request: Request):
+    return templates.TemplateResponse(request, "settings.html")
+
+
+# ── Collector status API ──
+
+
+@app.get("/api/v1/collectors/status")
+async def collectors_status() -> dict:
+    return {"collectors": collector_runner.status()}
 
 
 # ── HTMX partials ──
@@ -161,45 +181,64 @@ async def partial_recent_events():
         return '<tr><td colspan="4" class="text-muted">Unable to load events</td></tr>'
 
 
+@app.get("/partials/collector-status", response_class=HTMLResponse)
+async def partial_collector_status():
+    """Return collector status as HTML for HTMX."""
+    statuses = collector_runner.status()
+    if not statuses:
+        return '<p class="text-muted">No collectors registered</p>'
+
+    rows = []
+    for s in statuses:
+        dot_class = "dot-green" if s["running"] else "dot-red"
+        status_text = "Running" if s["running"] else "Stopped"
+        rows.append(
+            f'<div class="collector-status-row">'
+            f'<span class="status-dot {dot_class}"></span>'
+            f'<span class="collector-name">{s["name"]}</span>'
+            f'<span class="badge badge-muted">{status_text}</span>'
+            f'<span class="text-muted text-mono">{s["event_count"]:,} events</span>'
+            f'</div>'
+        )
+    return "\n".join(rows)
+
+
 @app.get("/partials/health-badges", response_class=HTMLResponse)
 async def partial_health_badges():
     """Return health badge HTML for HTMX."""
     import httpx
 
     es_status = "unknown"
-    es_class = "badge-muted"
     ollama_status = "unknown"
-    ollama_class = "badge-muted"
 
     try:
         es = await get_es_client()
         health = await es.cluster.health()
         es_status = health["status"]
-        es_class = {
-            "green": "badge-success",
-            "yellow": "badge-warning",
-            "red": "badge-danger",
-        }.get(es_status, "badge-muted")
     except Exception:
         es_status = "offline"
-        es_class = "badge-danger"
 
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.get(f"{settings.ollama_url}/api/tags")
             if resp.status_code == 200:
                 ollama_status = "online"
-                ollama_class = "badge-success"
             else:
                 ollama_status = "error"
-                ollama_class = "badge-danger"
     except Exception:
         ollama_status = "offline"
-        ollama_class = "badge-muted"
+
+    es_dot = {
+        "green": "dot-green",
+        "yellow": "dot-yellow",
+        "red": "dot-red",
+        "offline": "dot-red",
+    }.get(es_status, "dot-muted")
+    ollama_dot = "dot-green" if ollama_status == "online" else "dot-red" if ollama_status == "error" else "dot-muted"
 
     return (
-        f'<div id="health-badges-content">'
-        f'<span class="badge {es_class}">ES: {es_status}</span> '
-        f'<span class="badge {ollama_class}">AI: {ollama_status}</span>'
+        f'<div id="health-badges-content" class="health-badges-row">'
+        f'<span class="health-badge"><span class="status-dot {es_dot}"></span> ES: {es_status}</span>'
+        f'<span class="health-badge"><span class="status-dot {ollama_dot}"></span> AI: {ollama_status}</span>'
         f'</div>'
     )
