@@ -127,3 +127,22 @@ def test_build_rule_query_no_source():
 
     # Should have: condition + time range only (no source/category)
     assert len(must) == 2
+
+
+from siem.models.suppression import Suppression
+
+
+def test_suppression_matches_alert_context():
+    """Verify suppression matching works with the context format the engine produces."""
+    s = Suppression(
+        rule_id="sudo-escalation",
+        reason="testing",
+        match_fields={"user": "alex"},
+        source_alert_id="x",
+    )
+    # This is the format _build_alert_context produces
+    context = {"event_count": 6, "users": ["alex"], "hosts": ["myhost"]}
+    assert s.matches_context(context) is True
+
+    context_miss = {"event_count": 6, "users": ["bob"], "hosts": ["myhost"]}
+    assert s.matches_context(context_miss) is False

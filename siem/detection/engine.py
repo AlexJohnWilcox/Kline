@@ -9,6 +9,7 @@ from config.settings import settings
 from siem.detection.rule_loader import load_rules, reload_rules
 from siem.models.alert import Alert
 from siem.models.rule import DetectionRule, RuleCondition
+from siem.models.suppression import Suppression
 from siem.storage.es_client import get_es_client
 from siem.storage.indices import get_alert_index
 
@@ -84,7 +85,8 @@ class DetectionEngine:
         self._cooldowns: dict[str, datetime] = {}  # "rule_id:group_key" -> last_alert_time
         self._task: asyncio.Task | None = None
         self._running = False
-        self._last_reload: datetime = datetime.min
+        self._last_reload: datetime = datetime.min.replace(tzinfo=UTC)
+        self._last_expiry_check: datetime = datetime.min.replace(tzinfo=UTC)
 
     @property
     def rules(self) -> dict[str, DetectionRule]:
@@ -119,6 +121,7 @@ class DetectionEngine:
                     self._last_reload = now
                     self._cleanup_cooldowns()
 
+                await self._expire_suppressions()
                 await self._evaluate_all_rules()
             except asyncio.CancelledError:
                 raise
@@ -149,7 +152,6 @@ class DetectionEngine:
             return
 
         # Group key: for dedup, use the rule_id + a representative field
-        # (e.g., src_ip for network rules, user for auth rules)
         group_key = self._extract_group_key(hits)
         cooldown_key = f"{rule.id}:{group_key}"
 
@@ -160,10 +162,34 @@ class DetectionEngine:
             if elapsed < cooldown_minutes * 60:
                 return
 
-        # Create alert
+        # Build context and check suppressions
         event_ids = [hit["_id"] for hit in hits[:50]]
         context = self._build_alert_context(hits)
 
+        suppression_msg = await self._check_suppressions(rule, context)
+        if suppression_msg:
+            # Create auto-resolved alert
+            alert = Alert(
+                rule_id=rule.id,
+                rule_name=rule.name,
+                severity=rule.severity,
+                description=f"{rule.description} ({total} events in {rule.window_seconds}s window)",
+                matched_events=event_ids,
+                context=context,
+                status="resolved",
+                resolution_reason=suppression_msg,
+                ai_explanation=suppression_msg,
+            )
+            await es.index(
+                index=get_alert_index(),
+                id=alert.id,
+                document=alert.to_es_doc(),
+            )
+            self._cooldowns[cooldown_key] = datetime.now(UTC)
+            logger.info("alert_suppressed", alert_id=alert.id, rule_id=rule.id, msg=suppression_msg)
+            return
+
+        # Create normal alert
         alert = Alert(
             rule_id=rule.id,
             rule_name=rule.name,
@@ -173,7 +199,7 @@ class DetectionEngine:
             context=context,
         )
 
-        # Auto-explain with AI (best-effort, non-blocking on failure)
+        # Auto-explain with AI (best-effort)
         try:
             from siem.ai.explainer import auto_explain_alert
 
@@ -241,6 +267,103 @@ class DetectionEngine:
             context["hosts"] = sorted(hosts)
 
         return context
+
+    async def _expire_suppressions(self) -> None:
+        """Mark expired suppressions. Runs at most once per minute."""
+        now = datetime.now(UTC)
+        if (now - self._last_expiry_check).total_seconds() < 60:
+            return
+        self._last_expiry_check = now
+
+        try:
+            es = await get_es_client()
+            result = await es.search(
+                index="siem-suppressions",
+                body={
+                    "query": {
+                        "bool": {
+                            "must": [
+                                {"term": {"status": "active"}},
+                                {"range": {"expires_at": {"lt": now.isoformat()}}},
+                            ]
+                        }
+                    },
+                    "size": 100,
+                },
+            )
+            for hit in result["hits"]["hits"]:
+                await es.update(
+                    index=hit["_index"],
+                    id=hit["_id"],
+                    body={"doc": {"status": "expired"}},
+                )
+            if result["hits"]["hits"]:
+                logger.info("suppressions_expired", count=len(result["hits"]["hits"]))
+        except Exception:
+            pass  # Index may not exist yet
+
+    async def _check_suppressions(
+        self, rule: DetectionRule, context: dict
+    ) -> str | None:
+        """Check if a suppression matches this rule+context.
+
+        Returns a suppression message if suppressed, None otherwise.
+        Step 1: deterministic field match. Step 2: AI fallback.
+        """
+        try:
+            es = await get_es_client()
+            result = await es.search(
+                index="siem-suppressions",
+                body={
+                    "query": {
+                        "bool": {
+                            "must": [
+                                {"term": {"rule_id": rule.id}},
+                                {"term": {"status": "active"}},
+                            ],
+                            "should": [
+                                {"bool": {"must_not": {"exists": {"field": "expires_at"}}}},
+                                {"range": {"expires_at": {"gt": datetime.now(UTC).isoformat()}}},
+                            ],
+                            "minimum_should_match": 1,
+                        }
+                    },
+                    "size": 20,
+                },
+            )
+        except Exception:
+            return None  # Index may not exist yet
+
+        hits = result["hits"]["hits"]
+        if not hits:
+            return None
+
+        suppressions = [Suppression.from_es_hit(h) for h in hits]
+
+        # Step 1: Deterministic match
+        for s in suppressions:
+            if s.matches_context(context):
+                logger.info("suppression_deterministic_match", suppression_id=s.id, rule_id=rule.id)
+                return f"Auto-suppressed: {s.reason} (suppression {s.id})"
+
+        # Step 2: AI fallback
+        try:
+            from siem.ai.suppression_matcher import ai_match_suppression
+
+            for s in suppressions:
+                matched = await ai_match_suppression(
+                    suppression=s,
+                    alert_context=context,
+                    alert_rule_name=rule.name,
+                    alert_description=rule.description,
+                )
+                if matched:
+                    logger.info("suppression_ai_match", suppression_id=s.id, rule_id=rule.id)
+                    return f"AI-matched suppression: {s.reason} (suppression {s.id})"
+        except Exception:
+            logger.debug("suppression_ai_fallback_error", rule_id=rule.id)
+
+        return None
 
     def _cleanup_cooldowns(self) -> None:
         """Remove expired cooldown entries."""
