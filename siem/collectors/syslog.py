@@ -12,9 +12,17 @@ from siem.models.event import Event, EventCategory, EventSeverity
 
 logger = structlog.get_logger()
 
-# Common syslog line pattern: "Mar 22 10:15:32 hostname process[pid]: message"
+# Traditional: "Mar 22 10:15:32 hostname process[pid]: message"
 SYSLOG_PATTERN = re.compile(
     r"^(?P<timestamp>\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+"
+    r"(?P<host>\S+)\s+"
+    r"(?P<process>\S+?)(?:\[(?P<pid>\d+)\])?:\s+"
+    r"(?P<message>.*)$"
+)
+
+# ISO 8601: "2026-04-08T18:35:58.088727-04:00 hostname process[pid]: message"
+SYSLOG_ISO_PATTERN = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+[+-]\d{2}:\d{2})\s+"
     r"(?P<host>\S+)\s+"
     r"(?P<process>\S+?)(?:\[(?P<pid>\d+)\])?:\s+"
     r"(?P<message>.*)$"
@@ -32,16 +40,24 @@ CRITICAL_PATTERNS = re.compile(
 
 def parse_syslog_line(line: str) -> Event | None:
     """Parse a single syslog line into an Event."""
-    match = SYSLOG_PATTERN.match(line.strip())
+    line = line.strip()
+    match = SYSLOG_PATTERN.match(line)
+    iso_format = False
+    if not match:
+        match = SYSLOG_ISO_PATTERN.match(line)
+        iso_format = True
     if not match:
         return None
 
     groups = match.groupdict()
 
-    # Parse timestamp (syslog doesn't include year, assume current year)
+    # Parse timestamp
     try:
-        ts_str = f"{datetime.now(UTC).year} {groups['timestamp']}"
-        timestamp = datetime.strptime(ts_str, "%Y %b %d %H:%M:%S")
+        if iso_format:
+            timestamp = datetime.fromisoformat(groups['timestamp'])
+        else:
+            ts_str = f"{datetime.now(UTC).year} {groups['timestamp']}"
+            timestamp = datetime.strptime(ts_str, "%Y %b %d %H:%M:%S")
     except ValueError:
         timestamp = datetime.now(UTC)
 
