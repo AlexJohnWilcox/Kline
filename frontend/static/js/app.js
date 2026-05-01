@@ -1,4 +1,4 @@
-// SIEM Dashboard - Client-side utilities
+// Kline Dashboard - Client-side utilities
 
 // Configure HTMX
 document.addEventListener('htmx:configRequest', (event) => {
@@ -30,4 +30,50 @@ function severityColor(severity) {
         critical: '#ff3333',
     };
     return map[severity] || 'var(--text-muted)';
+}
+
+// ── Theme toggle ──
+// Symbols: ☀ (&#9728;) shown while dark → click for light;
+//          ☾ (&#9789;) shown while light → click for dark.
+function getCurrentTheme() {
+    return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+}
+
+function applyTheme(theme) {
+    if (theme === 'light') {
+        document.documentElement.setAttribute('data-theme', 'light');
+    } else {
+        document.documentElement.removeAttribute('data-theme');
+    }
+    try { localStorage.setItem('theme', theme); } catch (e) {}
+    updateThemeIcon(theme);
+}
+
+function updateThemeIcon(theme) {
+    const icon = document.getElementById('theme-icon');
+    if (!icon) return;
+    icon.innerHTML = theme === 'light' ? '&#9789;' : '&#9728;';
+}
+
+function toggleTheme() {
+    applyTheme(getCurrentTheme() === 'light' ? 'dark' : 'light');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    let t = 'dark';
+    try { t = localStorage.getItem('theme') || 'dark'; } catch (e) {}
+    updateThemeIcon(t);
+});
+
+// ── Logout ──
+async function logout() {
+    try {
+        await fetch('/api/v1/auth/logout', {
+            method: 'POST',
+            credentials: 'same-origin',
+        });
+    } catch (e) {
+        // Ignore network errors — we're leaving the page anyway.
+    }
+    window.location.href = '/login';
 }

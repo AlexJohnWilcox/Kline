@@ -3,11 +3,13 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.sessions import SessionMiddleware
 
 from config.settings import settings
+from siem.auth import seed_admin_if_missing
 from siem.collectors.docker import DockerCollector
 from siem.collectors.network import NetworkCollector
 from siem.collectors.syslog import SyslogCollector
@@ -37,6 +39,9 @@ async def lifespan(app: FastAPI):
     # Initialize Elasticsearch
     es = await get_es_client()
     await setup_indices(es)
+
+    # Seed the admin account on first boot (idempotent).
+    await seed_admin_if_missing(settings.admin_username, settings.admin_password)
 
     # Register and start collectors
     collector_runner.register(SyslogCollector())
@@ -77,7 +82,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Krungle",
+    title="Kline",
     description="AI-powered SIEM for local log analysis",
     version="0.1.0",
     lifespan=lifespan,
@@ -86,9 +91,46 @@ app = FastAPI(
 # Mount static files
 app.mount("/static", StaticFiles(directory=str(settings.static_dir)), name="static")
 
+# ── Auth middleware ──
+# Runs BEFORE SessionMiddleware is wired (the decorator is inner; SessionMiddleware
+# is added later so it sits outside and populates request.session first).
+
+_AUTH_PUBLIC_PATHS = {"/login", "/api/v1/health"}
+_AUTH_PUBLIC_PREFIXES = ("/static/", "/favicon", "/api/v1/auth/")
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if path in _AUTH_PUBLIC_PATHS or path.startswith(_AUTH_PUBLIC_PREFIXES):
+        return await call_next(request)
+    if request.session.get("user_id"):
+        return await call_next(request)
+
+    # Unauthenticated — HTMX gets a client-side redirect, browsers get a 302,
+    # anything else (curl/API clients) gets plain 401 JSON.
+    if request.headers.get("hx-request"):
+        resp = JSONResponse({"detail": "Not authenticated"}, status_code=401)
+        resp.headers["HX-Redirect"] = "/login"
+        return resp
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url="/login", status_code=302)
+    return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.session_secret,
+    session_cookie=settings.session_cookie_name,
+    max_age=settings.session_max_age_seconds,
+    same_site="lax",
+    https_only=settings.session_https_only,
+)
+
 # Register API routers
 from siem.api.ai import router as ai_router
 from siem.api.alerts import router as alerts_router
+from siem.api.auth import router as auth_router
 from siem.api.events import router as events_router
 from siem.api.dashboard import router as dashboard_router
 from siem.api.health import router as health_router
@@ -98,6 +140,7 @@ from siem.api.suppressions import router as suppressions_router
 
 app.include_router(ai_router)
 app.include_router(alerts_router)
+app.include_router(auth_router)
 app.include_router(events_router)
 app.include_router(dashboard_router)
 app.include_router(health_router)
@@ -107,6 +150,13 @@ app.include_router(suppressions_router)
 
 
 # ── Page routes (serve Jinja2 templates) ──
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def page_login(request: Request):
+    if request.session.get("user_id"):
+        return RedirectResponse(url="/", status_code=302)
+    return templates.TemplateResponse(request, "login.html")
 
 
 @app.get("/", response_class=HTMLResponse)

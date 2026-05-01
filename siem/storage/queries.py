@@ -76,7 +76,13 @@ async def index_events_bulk(es: AsyncElasticsearch, events: list[Event]) -> int:
         operations.append(event.to_es_doc())
 
     result = await es.bulk(operations=operations)
-    return len(events) - len(result.get("errors", []))
+    if not result.get("errors"):
+        return len(events)
+    failed = sum(
+        1 for item in result.get("items", [])
+        if next(iter(item.values())).get("error") is not None
+    )
+    return len(events) - failed
 
 
 async def get_event_stats(

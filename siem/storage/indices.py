@@ -74,6 +74,27 @@ SUPPRESSION_INDEX_TEMPLATE = {
     },
 }
 
+USER_INDEX_TEMPLATE = {
+    "index_patterns": ["siem-users"],
+    "template": {
+        "settings": {
+            "number_of_shards": 1,
+            "number_of_replicas": 0,
+        },
+        "mappings": {
+            "properties": {
+                "id": {"type": "keyword"},
+                "username": {"type": "keyword"},
+                "password_hash": {"type": "keyword", "index": False},
+                "role": {"type": "keyword"},
+                "status": {"type": "keyword"},
+                "created_at": {"type": "date"},
+                "last_login": {"type": "date"},
+            }
+        },
+    },
+}
+
 
 def get_event_index() -> str:
     """Get the current month's event index name."""
@@ -104,3 +125,9 @@ async def setup_indices(es: AsyncElasticsearch) -> None:
         body=SUPPRESSION_INDEX_TEMPLATE,
     )
     logger.info("index_template_created", name="siem-suppressions")
+
+    await es.indices.put_index_template(
+        name="siem-users",
+        body=USER_INDEX_TEMPLATE,
+    )
+    logger.info("index_template_created", name="siem-users")

@@ -3,8 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Krungle{% endblock %}</title>
+    <title>{% block title %}Kline{% endblock %}</title>
+    <link rel="icon" type="image/png" href="/static/img/kline-symbol.png">
     <link rel="stylesheet" href="/static/css/app.css">
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('theme');
+                if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+            } catch (e) {}
+        })();
+    </script>
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <script defer src="https://unpkg.com/alpinejs@3.14.8/dist/cdn.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
@@ -15,7 +24,7 @@
     <!-- Sidebar -->
     <aside class="sidebar" :class="{ 'collapsed': !sidebarOpen }">
         <div class="sidebar-header">
-            <span class="logo" x-show="sidebarOpen">Krungle</span>
+            <span class="logo" x-show="sidebarOpen">Kline</span>
             <button class="sidebar-toggle" @click="sidebarOpen = !sidebarOpen">
                 <span x-text="sidebarOpen ? '&#9664;' : '&#9654;'"></span>
             </button>
@@ -64,6 +73,27 @@
                         <span class="badge badge-muted">AI: ...</span>
                     </div>
                 </div>
+                <button class="icon-btn" type="button"
+                        title="Toggle theme"
+                        aria-label="Toggle light/dark theme"
+                        onclick="toggleTheme()">
+                    <span id="theme-icon" aria-hidden="true">&#9728;</span>
+                </button>
+                <div class="user-menu" x-data="{ open: false }">
+                    <button class="user-menu-btn" type="button" @click="open = !open"
+                            :aria-expanded="open">
+                        <span class="user-menu-name">{{ request.session.get('username', 'account') }}</span>
+                        <span class="user-menu-caret" aria-hidden="true">&#9662;</span>
+                    </button>
+                    <div class="user-menu-dropdown"
+                         x-show="open" x-cloak
+                         @click.outside="open = false"
+                         x-transition.opacity>
+                        <button type="button" class="user-menu-item" onclick="logout()">
+                            Sign out
+                        </button>
+                    </div>
+                </div>
             </div>
         </header>
 
@@ -71,6 +101,10 @@
         <main class="content">
             {% block content %}{% endblock %}
         </main>
+
+        <footer class="app-footer">
+            <img src="/static/img/kline-logo.png" alt="Kline" class="app-footer-logo">
+        </footer>
     </div>
 
     <script src="/static/js/walkthrough.js"></script>

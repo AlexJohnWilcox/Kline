@@ -1,5 +1,7 @@
 from pathlib import Path
+from secrets import token_urlsafe
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,6 +34,17 @@ class Settings(BaseSettings):
     # Retention
     event_retention_days: int = 90
     alert_retention_days: int = 365
+
+    # Auth
+    # If SESSION_SECRET is unset, a random one is generated per process
+    # (sessions invalidate on restart). Set it in .env for stable sessions.
+    session_secret: str = Field(default_factory=lambda: token_urlsafe(32))
+    session_cookie_name: str = "kline_session"
+    session_max_age_seconds: int = 43200  # 12 hours
+    session_https_only: bool = False
+    # First-boot admin seed — only used if no user with this username exists.
+    admin_username: str = "alexwilcox"
+    admin_password: str = "REDACTED"
 
     # Paths
     rules_dir: Path = Path("rules")

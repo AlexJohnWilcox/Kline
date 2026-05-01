@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kline - Sign in</title>
+    <link rel="stylesheet" href="/static/css/app.css">
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('theme');
+                if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+            } catch (e) {}
+        })();
+    </script>
+</head>
+<body class="login-body">
+    <button type="button" class="icon-btn login-theme-toggle"
+            title="Toggle theme"
+            aria-label="Toggle light/dark theme"
+            onclick="toggleLoginTheme()">
+        <span id="theme-icon" aria-hidden="true">&#9728;</span>
+    </button>
+    <main class="login-wrap login-wrap-with-footer">
+        <div class="login-card">
+            <h1 class="login-logo">Kline</h1>
+            <p class="login-tagline">AI-powered SIEM</p>
+            <form class="login-form" id="login-form" autocomplete="on" novalidate>
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" name="username"
+                           autocomplete="username" autocapitalize="none"
+                           spellcheck="false" autofocus required>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password"
+                           autocomplete="current-password" required>
+                </div>
+                <div id="login-error" class="login-error" role="alert" hidden></div>
+                <button type="submit" class="btn btn-primary btn-block" id="login-submit">
+                    Sign in
+                </button>
+            </form>
+        </div>
+    </main>
+    <footer class="app-footer">
+        <img src="/static/img/kline-logo.png" alt="Kline" class="app-footer-logo">
+    </footer>
+    <script>
+        function toggleLoginTheme() {
+            var isLight = document.documentElement.getAttribute('data-theme') === 'light';
+            var next = isLight ? 'dark' : 'light';
+            if (next === 'light') {
+                document.documentElement.setAttribute('data-theme', 'light');
+            } else {
+                document.documentElement.removeAttribute('data-theme');
+            }
+            try { localStorage.setItem('theme', next); } catch (e) {}
+            var icon = document.getElementById('theme-icon');
+            if (icon) icon.innerHTML = next === 'light' ? '&#9789;' : '&#9728;';
+        }
+        (function () {
+            var t = 'dark';
+            try { t = localStorage.getItem('theme') || 'dark'; } catch (e) {}
+            var icon = document.getElementById('theme-icon');
+            if (icon) icon.innerHTML = t === 'light' ? '&#9789;' : '&#9728;';
+        })();
+        (function () {
+            var form = document.getElementById('login-form');
+            var errBox = document.getElementById('login-error');
+            var submitBtn = document.getElementById('login-submit');
+
+            function showError(msg) {
+                errBox.textContent = msg;
+                errBox.hidden = false;
+            }
+
+            form.addEventListener('submit', async function (ev) {
+                ev.preventDefault();
+                errBox.hidden = true;
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Signing in…';
+                try {
+                    var resp = await fetch('/api/v1/auth/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        credentials: 'same-origin',
+                        body: JSON.stringify({
+                            username: document.getElementById('username').value,
+                            password: document.getElementById('password').value,
+                        }),
+                    });
+                    if (resp.ok) {
+                        window.location.href = '/';
+                        return;
+                    }
+                    var msg = 'Invalid username or password';
+                    try {
+                        var body = await resp.json();
+                        if (body && body.detail) msg = body.detail;
+                    } catch (e) {}
+                    showError(msg);
+                } catch (err) {
+                    showError('Network error — please try again');
+                } finally {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Sign in';
+                }
+            });
+        })();
+    </script>
+</body>
+</html>

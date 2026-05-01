@@ -1,6 +1,7 @@
 import json
 
 import structlog
+from elasticsearch import ApiError
 
 from siem.ai.client import OllamaError, get_ollama_client
 from siem.models.event import Event
@@ -103,9 +104,16 @@ async def natural_language_query(question: str) -> NLQueryResponse:
         es_query = _fallback_query(question)
         used_fallback = True
 
-    # Execute query
+    # Execute query — if ES rejects the LLM-generated DSL, fall back to multi_match.
     body = {**es_query, "size": 50, "sort": [{"timestamp": {"order": "desc"}}]}
-    result = await es.search(index="siem-events-*", body=body)
+    try:
+        result = await es.search(index="siem-events-*", body=body)
+    except ApiError as e:
+        logger.warning("nl_query_es_rejected", error=str(e), query=es_query)
+        es_query = _fallback_query(question)
+        used_fallback = True
+        body = {**es_query, "size": 50, "sort": [{"timestamp": {"order": "desc"}}]}
+        result = await es.search(index="siem-events-*", body=body)
     total = result["hits"]["total"]["value"]
     hits = result["hits"]["hits"]
     events = [Event.from_es_hit(hit).model_dump() for hit in hits]
