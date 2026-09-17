@@ -14,9 +14,6 @@ async def get_checkpoint(es, name: str) -> int:
         doc = await es.get(index=STATE_INDEX, id=name)
     except NotFoundError:
         return 0
-    except Exception:
-        logger.exception("checkpoint_read_error", name=name)
-        return 0
     return int(doc["_source"].get("value", 0))
 
 
@@ -26,5 +23,5 @@ async def set_checkpoint(es, name: str, value: int) -> None:
         index=STATE_INDEX,
         id=name,
         document={"value": value, "updated_at": datetime.now(UTC).isoformat()},
-        refresh=True,
+        refresh="wait_for",
     )

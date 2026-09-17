@@ -1,4 +1,5 @@
 import pytest
+from elasticsearch import ConnectionError
 
 from siem.storage.checkpoint import get_checkpoint, set_checkpoint
 
@@ -22,6 +23,13 @@ class FakeES:
         self.indexed.append((index, id, document))
 
 
+class FakeESWithConnectionError:
+    """FakeES that raises ConnectionError on get."""
+
+    async def get(self, index, id):
+        raise ConnectionError("Connection refused")
+
+
 @pytest.mark.asyncio
 async def test_missing_checkpoint_reads_as_zero():
     es = FakeES()
@@ -43,3 +51,11 @@ async def test_checkpoint_writes_to_the_state_index():
     assert index == "siem-state"
     assert doc_id == "pihole_rowid"
     assert document["value"] == 42
+
+
+@pytest.mark.asyncio
+async def test_connection_error_propagates():
+    """ConnectionError from Elasticsearch should propagate, not be swallowed as 0."""
+    es = FakeESWithConnectionError()
+    with pytest.raises(ConnectionError):
+        await get_checkpoint(es, "pihole_rowid")
