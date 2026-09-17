@@ -18,6 +18,11 @@ logger = structlog.get_logger()
 
 TOP_LEVEL_FIELDS = ("source", "category", "severity", "host", "message", "tags")
 
+# Cap on the number of terms buckets a grouped rule can breach on in one
+# evaluation. Kept as a named constant so the query builder and the
+# truncation check below can never drift apart.
+GROUP_BY_BUCKET_SIZE = 50
+
 
 def _resolve_field(name: str) -> str:
     """Map a rule's field name to its Elasticsearch path."""
@@ -83,7 +88,7 @@ def build_rule_query(rule: DetectionRule) -> dict[str, Any]:
             "groups": {
                 "terms": {
                     "field": _resolve_field(rule.group_by),
-                    "size": 50,
+                    "size": GROUP_BY_BUCKET_SIZE,
                     "min_doc_count": rule.threshold,
                 }
             }
@@ -92,13 +97,18 @@ def build_rule_query(rule: DetectionRule) -> dict[str, Any]:
     return query
 
 
-def grouped_breaches(response: dict[str, Any], threshold: int) -> list[tuple[str, int]]:
-    """Buckets that met the threshold, as (key, count), highest first."""
+def grouped_breaches(response: dict[str, Any], threshold: int) -> list[tuple[Any, int]]:
+    """Buckets that met the threshold, as (key, count), highest first.
+
+    Prefers ``key_as_string`` over the raw ``key`` so boolean/date terms
+    (which ES returns as ``0``/``1`` or epoch millis) come back in their
+    human form instead of a form that silently fails to match hits later.
+    """
     buckets = (
         response.get("aggregations", {}).get("groups", {}).get("buckets", [])
     )
     return [
-        (b["key"], b["doc_count"])
+        (b.get("key_as_string", b["key"]), b["doc_count"])
         for b in buckets
         if b["doc_count"] >= threshold
     ]
@@ -182,18 +192,61 @@ class DetectionEngine:
 
         # A grouped rule thresholds per bucket and raises one alert each.
         if rule.group_by:
+            agg_buckets = (
+                result.get("aggregations", {}).get("groups", {}).get("buckets", [])
+            )
+            if len(agg_buckets) >= GROUP_BY_BUCKET_SIZE:
+                logger.warning(
+                    "grouped_rule_bucket_cap_reached",
+                    rule_id=rule.id,
+                    group_by=rule.group_by,
+                    bucket_cap=GROUP_BY_BUCKET_SIZE,
+                )
+
             for key, count in grouped_breaches(result, rule.threshold):
                 bucket_hits = [
                     h for h in hits
-                    if str(self._hit_field(h, rule.group_by)) == str(key)
+                    if str(self._hit_field(h, rule.group_by)).lower() == str(key).lower()
                 ]
-                await self._raise_alert(es, rule, bucket_hits or hits, str(key), count)
+                if not bucket_hits:
+                    # The window's top-100-by-recency page didn't include this
+                    # bucket's own events (common once a client's doc_count
+                    # exceeds 100). Re-query narrowed to this bucket rather
+                    # than attach another client's events as evidence.
+                    bucket_hits = await self._fetch_bucket_hits(es, rule, key)
+                await self._raise_alert(es, rule, bucket_hits, str(key), count)
             return
 
         if total < rule.threshold:
             return
 
         await self._raise_alert(es, rule, hits, self._extract_group_key(hits), total)
+
+    async def _fetch_bucket_hits(
+        self, es: AsyncElasticsearch, rule: DetectionRule, key: Any
+    ) -> list[dict]:
+        """Re-query a grouped rule narrowed to one bucket's own events.
+
+        Used when the rule's normal (unfiltered) page of hits didn't happen
+        to contain any events for a breaching bucket. Bounded to a single
+        extra search and never lets a failure escape to the caller — an
+        alert with no evidence is preferable to one with wrong evidence,
+        but a failed re-query must not abort evaluation of other buckets
+        or other rules.
+        """
+        try:
+            query = build_rule_query(rule)
+            query.pop("aggs", None)
+            query["query"]["bool"]["must"].append(
+                {"term": {_resolve_field(rule.group_by): key}}
+            )
+            result = await es.search(index="siem-events-*", body=query)
+            return result["hits"]["hits"]
+        except Exception:
+            logger.exception(
+                "bucket_requery_failed", rule_id=rule.id, group_key=str(key)
+            )
+            return []
 
     async def _raise_alert(
         self,

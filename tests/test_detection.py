@@ -174,11 +174,15 @@ def test_grouped_query_aggregates_on_the_keyword_field():
     terms = query["aggs"]["groups"]["terms"]
     assert terms["field"] == "parsed.client"
     assert terms["min_doc_count"] == 20
+    assert terms["size"] == 50
 
 
 def test_grouped_query_passes_through_an_explicit_dot_path():
-    query = build_rule_query(_rule(group_by="host"))
-    assert query["aggs"]["groups"]["terms"]["field"] == "host"
+    # "host" is a TOP_LEVEL_FIELDS name, not a dot path, and would pass
+    # through _resolve_field unchanged either way — use a real dot path
+    # so this test actually exercises the dotted branch.
+    query = build_rule_query(_rule(group_by="parsed.client"))
+    assert query["aggs"]["groups"]["terms"]["field"] == "parsed.client"
 
 
 def test_grouped_breaches_returns_buckets_over_threshold():
@@ -198,6 +202,15 @@ def test_grouped_breaches_returns_buckets_over_threshold():
     ]
 
 
+def test_grouped_breaches_includes_bucket_at_exact_threshold():
+    """`>=` is the semantics of "met the threshold" — a bucket with
+    doc_count exactly equal to the threshold must not be dropped."""
+    response = {"aggregations": {"groups": {"buckets": [
+        {"key": "a", "doc_count": 20},
+    ]}}}
+    assert grouped_breaches(response, threshold=20) == [("a", 20)]
+
+
 def test_grouped_breaches_excludes_buckets_under_threshold():
     response = {"aggregations": {"groups": {"buckets": [
         {"key": "a", "doc_count": 5},
@@ -207,3 +220,163 @@ def test_grouped_breaches_excludes_buckets_under_threshold():
 
 def test_grouped_breaches_on_a_response_with_no_aggregation():
     assert grouped_breaches({}, threshold=1) == []
+
+
+def test_grouped_breaches_prefers_key_as_string():
+    """Boolean/date terms come back as key: 0/1 with the human form in
+    key_as_string; prefer the human form so later string matching against
+    hit field values (e.g. str(True)) has a chance of succeeding."""
+    response = {"aggregations": {"groups": {"buckets": [
+        {"key": 1, "key_as_string": "true", "doc_count": 25},
+    ]}}}
+    assert grouped_breaches(response, threshold=20) == [("true", 25)]
+
+
+# ── _evaluate_rule / _raise_alert split ──
+
+from unittest.mock import AsyncMock
+
+from siem.detection.engine import DetectionEngine
+
+
+async def test_evaluate_rule_ungrouped_calls_raise_alert_once_with_total():
+    """The ungrouped path must still call _raise_alert with the group key
+    from _extract_group_key and the total hit count, unchanged."""
+    engine = DetectionEngine()
+    engine._raise_alert = AsyncMock()
+    rule = _rule(group_by=None, threshold=2)
+    hits = [
+        {"_id": "1", "_source": {"host": "h1", "parsed": {"blocked": True}}},
+        {"_id": "2", "_source": {"host": "h1", "parsed": {"blocked": True}}},
+    ]
+    mock_es = AsyncMock()
+    mock_es.search = AsyncMock(
+        return_value={"hits": {"total": {"value": 2}, "hits": hits}}
+    )
+
+    await engine._evaluate_rule(mock_es, rule)
+
+    engine._raise_alert.assert_awaited_once_with(
+        mock_es, rule, hits, engine._extract_group_key(hits), 2
+    )
+
+
+async def test_evaluate_rule_ungrouped_below_threshold_skips_raise_alert():
+    engine = DetectionEngine()
+    engine._raise_alert = AsyncMock()
+    rule = _rule(group_by=None, threshold=5)
+    mock_es = AsyncMock()
+    mock_es.search = AsyncMock(
+        return_value={"hits": {"total": {"value": 2}, "hits": []}}
+    )
+
+    await engine._evaluate_rule(mock_es, rule)
+
+    engine._raise_alert.assert_not_awaited()
+
+
+async def test_evaluate_rule_grouped_calls_raise_alert_per_bucket():
+    """A grouped rule must call _raise_alert once per breaching bucket,
+    each with that bucket's own key and count, filtered to that bucket's
+    own hits."""
+    engine = DetectionEngine()
+    engine._raise_alert = AsyncMock()
+    rule = _rule(group_by="client", threshold=20)
+    hit_a = {"_id": "a1", "_source": {"host": "h1", "parsed": {
+        "client": "192.168.10.241", "blocked": True,
+    }}}
+    hit_b = {"_id": "b1", "_source": {"host": "h1", "parsed": {
+        "client": "192.168.10.203", "blocked": True,
+    }}}
+    mock_es = AsyncMock()
+    mock_es.search = AsyncMock(
+        return_value={
+            "hits": {"total": {"value": 76}, "hits": [hit_a, hit_b]},
+            "aggregations": {"groups": {"buckets": [
+                {"key": "192.168.10.241", "doc_count": 55},
+                {"key": "192.168.10.203", "doc_count": 21},
+            ]}},
+        }
+    )
+
+    await engine._evaluate_rule(mock_es, rule)
+
+    assert engine._raise_alert.await_count == 2
+    engine._raise_alert.assert_any_await(
+        mock_es, rule, [hit_a], "192.168.10.241", 55
+    )
+    engine._raise_alert.assert_any_await(
+        mock_es, rule, [hit_b], "192.168.10.203", 21
+    )
+    # Only one search call was needed — both buckets' hits were already
+    # on the page.
+    assert mock_es.search.await_count == 1
+
+
+async def test_evaluate_rule_grouped_requeries_instead_of_borrowing_foreign_hits():
+    """If a breaching bucket's own events aren't on the window's recency-
+    sorted page (common once a client's doc_count exceeds the page size),
+    the engine must re-query narrowed to that bucket rather than raise an
+    alert using another client's hits as evidence."""
+    engine = DetectionEngine()
+    engine._raise_alert = AsyncMock()
+    rule = _rule(group_by="client", threshold=20)
+
+    # The unfiltered page is entirely client B's traffic; client A breached
+    # with 5000 events but none of A's events made the top-100-by-recency
+    # page.
+    foreign_hit = {"_id": "b1", "_source": {"host": "h1", "parsed": {
+        "client": "192.168.10.203", "blocked": True,
+    }}}
+    own_hit = {"_id": "a1", "_source": {"host": "h1", "parsed": {
+        "client": "192.168.10.241", "blocked": True,
+    }}}
+
+    mock_es = AsyncMock()
+    mock_es.search = AsyncMock(side_effect=[
+        {
+            "hits": {"total": {"value": 5100}, "hits": [foreign_hit]},
+            "aggregations": {"groups": {"buckets": [
+                {"key": "192.168.10.241", "doc_count": 5000},
+            ]}},
+        },
+        {"hits": {"total": {"value": 5000}, "hits": [own_hit]}},
+    ])
+
+    await engine._evaluate_rule(mock_es, rule)
+
+    assert mock_es.search.await_count == 2
+    requery_body = mock_es.search.await_args_list[1].kwargs["body"]
+    assert {"term": {"parsed.client": "192.168.10.241"}} in (
+        requery_body["query"]["bool"]["must"]
+    )
+    assert "aggs" not in requery_body
+
+    engine._raise_alert.assert_awaited_once_with(
+        mock_es, rule, [own_hit], "192.168.10.241", 5000
+    )
+
+
+async def test_evaluate_rule_grouped_requery_failure_yields_empty_hits():
+    """A failed re-query must not escape _evaluate_rule — it should raise
+    the alert with no evidence rather than crash evaluation."""
+    engine = DetectionEngine()
+    engine._raise_alert = AsyncMock()
+    rule = _rule(group_by="client", threshold=20)
+
+    mock_es = AsyncMock()
+    mock_es.search = AsyncMock(side_effect=[
+        {
+            "hits": {"total": {"value": 5000}, "hits": []},
+            "aggregations": {"groups": {"buckets": [
+                {"key": "192.168.10.241", "doc_count": 5000},
+            ]}},
+        },
+        RuntimeError("es unavailable"),
+    ])
+
+    await engine._evaluate_rule(mock_es, rule)
+
+    engine._raise_alert.assert_awaited_once_with(
+        mock_es, rule, [], "192.168.10.241", 5000
+    )
