@@ -1,5 +1,3 @@
-from datetime import UTC
-
 from siem.collectors.pihole import FTL_FIELD_SEP, parse_ftl_line
 from siem.models.event import EventCategory, EventSeverity
 
@@ -119,10 +117,10 @@ async def test_collect_yields_events_and_advances_the_cursor(monkeypatch):
     ran and the cursor would never be written at all.
 
     fake_get returns 0 on an unseeded checkpoint, so this also exercises a
-    real cold start: fake_run must answer the SELECT_BACKFILL_START query
-    (it contains "MIN(id)", never "MAX(id)" or "id > ") or _starting_point()
-    raises IndexError and this test would hang retrying forever instead of
-    testing anything -- see the checkpoint-resolution regression tests below.
+    real cold start: fake_run must answer the `backfill` verb or
+    _starting_point() raises and this test would hang retrying forever
+    instead of testing anything -- see the checkpoint-resolution regression
+    tests below.
     """
     collector = PiholeCollector(ssh_host="oracle", poll_seconds=0, batch_size=2)
     all_rows = {
@@ -131,14 +129,14 @@ async def test_collect_yields_events_and_advances_the_cursor(monkeypatch):
         12: _line(rowid="12", domain="c.example", status="2"),
     }
 
-    async def fake_run(self, sql):
-        if "MAX(id)" in sql:
+    async def fake_run(self, verb):
+        if verb == "max":
             return "12"
-        if "MIN(id)" in sql:
+        if verb.startswith("backfill "):
             return "10\n"  # cold start resolves to cursor 9 (exclusive)
-        after = int(sql.split("id > ")[1].split(" ")[0])
-        due = [all_rows[k] for k in sorted(all_rows) if k > after][:2]
-        return "\n".join(due)
+        _, after, limit = verb.split()
+        due = [all_rows[k] for k in sorted(all_rows) if k > int(after)]
+        return "\n".join(due[: int(limit)])
 
     saved = {}
 
@@ -151,7 +149,7 @@ async def test_collect_yields_events_and_advances_the_cursor(monkeypatch):
     async def fake_es_client():
         return object()
 
-    monkeypatch.setattr(PiholeCollector, "_run_sql", fake_run)
+    monkeypatch.setattr(PiholeCollector, "_run_remote", fake_run)
     monkeypatch.setattr("siem.collectors.pihole.get_checkpoint", fake_get)
     monkeypatch.setattr("siem.collectors.pihole.set_checkpoint", fake_set)
     monkeypatch.setattr("siem.collectors.pihole.get_es_client", fake_es_client)
@@ -179,25 +177,25 @@ async def test_a_cold_start_is_bounded_to_the_backfill_window(monkeypatch):
     collector = PiholeCollector(ssh_host="oracle", backfill_days=30)
     seen = {}
 
-    async def fake_run(self, sql):
-        seen["sql"] = sql
+    async def fake_run(self, verb):
+        seen["verb"] = verb
         return "1000000\n"
 
-    monkeypatch.setattr(PiholeCollector, "_run_sql", fake_run)
+    monkeypatch.setattr(PiholeCollector, "_run_remote", fake_run)
 
     # Exclusive cursor: one below the first in-window row, so that row is read.
     assert await collector._starting_point() == 999_999
-    assert "-30 day" in seen["sql"]
+    assert seen["verb"] == "backfill 30"
 
 
 @pytest.mark.asyncio
 async def test_a_cold_start_on_an_empty_database_starts_at_zero(monkeypatch):
     collector = PiholeCollector(ssh_host="oracle", backfill_days=30)
 
-    async def fake_run(self, sql):
+    async def fake_run(self, verb):
         return "0\n"
 
-    monkeypatch.setattr(PiholeCollector, "_run_sql", fake_run)
+    monkeypatch.setattr(PiholeCollector, "_run_remote", fake_run)
     assert await collector._starting_point() == 0
 
 
@@ -221,12 +219,12 @@ async def test_checkpoint_read_failure_at_startup_does_not_escape_collect_and_re
         12: _line(rowid="12", domain="c.example", status="2"),
     }
 
-    async def fake_run(self, sql):
-        if "MAX(id)" in sql:
+    async def fake_run(self, verb):
+        if verb == "max":
             return "12"
-        after = int(sql.split("id > ")[1].split(" ")[0])
-        due = [all_rows[k] for k in sorted(all_rows) if k > after][:2]
-        return "\n".join(due)
+        _, after, limit = verb.split()
+        due = [all_rows[k] for k in sorted(all_rows) if k > int(after)]
+        return "\n".join(due[: int(limit)])
 
     calls = {"get_checkpoint": 0}
 
@@ -244,7 +242,7 @@ async def test_checkpoint_read_failure_at_startup_does_not_escape_collect_and_re
     async def fake_es_client():
         return object()
 
-    monkeypatch.setattr(PiholeCollector, "_run_sql", fake_run)
+    monkeypatch.setattr(PiholeCollector, "_run_remote", fake_run)
     monkeypatch.setattr("siem.collectors.pihole.get_checkpoint", fake_get)
     monkeypatch.setattr("siem.collectors.pihole.set_checkpoint", fake_set)
     monkeypatch.setattr("siem.collectors.pihole.get_es_client", fake_es_client)
@@ -282,12 +280,12 @@ async def test_a_failed_checkpoint_write_holds_the_cursor_so_the_next_pass_rerea
         11: _line(rowid="11", domain="b.example", status="1"),
     }
 
-    async def fake_run(self, sql):
-        if "MAX(id)" in sql:
+    async def fake_run(self, verb):
+        if verb == "max":
             return "11"
-        after = int(sql.split("id > ")[1].split(" ")[0])
-        due = [all_rows[k] for k in sorted(all_rows) if k > after][:1]
-        return "\n".join(due)
+        _, after, limit = verb.split()
+        due = [all_rows[k] for k in sorted(all_rows) if k > int(after)]
+        return "\n".join(due[: int(limit)])
 
     async def fake_get(es, name):
         return 9
@@ -302,7 +300,7 @@ async def test_a_failed_checkpoint_write_holds_the_cursor_so_the_next_pass_rerea
     async def fake_es_client():
         return object()
 
-    monkeypatch.setattr(PiholeCollector, "_run_sql", fake_run)
+    monkeypatch.setattr(PiholeCollector, "_run_remote", fake_run)
     monkeypatch.setattr("siem.collectors.pihole.get_checkpoint", fake_get)
     monkeypatch.setattr("siem.collectors.pihole.set_checkpoint", fake_set)
     monkeypatch.setattr("siem.collectors.pihole.get_es_client", fake_es_client)
@@ -346,17 +344,17 @@ async def test_a_failed_cold_start_backfill_lookup_retries_rather_than_reading_e
     }
     calls = {"backfill": 0}
 
-    async def fake_run(self, sql):
-        if "MAX(id)" in sql:
+    async def fake_run(self, verb):
+        if verb == "max":
             return "11"
-        if "MIN(id)" in sql:
+        if verb.startswith("backfill "):
             calls["backfill"] += 1
             if calls["backfill"] == 1:
                 raise RuntimeError("ssh hiccup")
             return "10\n"
-        after = int(sql.split("id > ")[1].split(" ")[0])
-        due = [all_rows[k] for k in sorted(all_rows) if k > after][:2]
-        return "\n".join(due)
+        _, after, limit = verb.split()
+        due = [all_rows[k] for k in sorted(all_rows) if k > int(after)]
+        return "\n".join(due[: int(limit)])
 
     async def fake_get(es, name):
         return 0  # unseeded checkpoint -- always triggers a cold start
@@ -369,7 +367,7 @@ async def test_a_failed_cold_start_backfill_lookup_retries_rather_than_reading_e
     async def fake_es_client():
         return object()
 
-    monkeypatch.setattr(PiholeCollector, "_run_sql", fake_run)
+    monkeypatch.setattr(PiholeCollector, "_run_remote", fake_run)
     monkeypatch.setattr("siem.collectors.pihole.get_checkpoint", fake_get)
     monkeypatch.setattr("siem.collectors.pihole.set_checkpoint", fake_set)
     monkeypatch.setattr("siem.collectors.pihole.get_es_client", fake_es_client)
@@ -402,10 +400,10 @@ async def test_a_batch_of_unparseable_rows_still_advances_the_cursor(monkeypatch
     bad_row = _line(rowid="10", domain="", client="")
     good_row = _line(rowid="11", domain="a.example", status="2")
 
-    async def fake_run(self, sql):
-        if "MAX(id)" in sql:
+    async def fake_run(self, verb):
+        if verb == "max":
             return "11"
-        after = int(sql.split("id > ")[1].split(" ")[0])
+        after = int(verb.split()[1])
         return bad_row if after < 10 else good_row
 
     async def fake_get(es, name):
@@ -419,7 +417,7 @@ async def test_a_batch_of_unparseable_rows_still_advances_the_cursor(monkeypatch
     async def fake_es_client():
         return object()
 
-    monkeypatch.setattr(PiholeCollector, "_run_sql", fake_run)
+    monkeypatch.setattr(PiholeCollector, "_run_remote", fake_run)
     monkeypatch.setattr("siem.collectors.pihole.get_checkpoint", fake_get)
     monkeypatch.setattr("siem.collectors.pihole.set_checkpoint", fake_set)
     monkeypatch.setattr("siem.collectors.pihole.get_es_client", fake_es_client)
@@ -451,8 +449,8 @@ async def test_a_persistent_checkpoint_write_failure_still_sleeps_on_a_full_batc
     collector = PiholeCollector(ssh_host="oracle", poll_seconds=30, batch_size=1)
     row = _line(rowid="10", domain="a.example", status="2")
 
-    async def fake_run(self, sql):
-        if "MAX(id)" in sql:
+    async def fake_run(self, verb):
+        if verb == "max":
             return "10"
         return row
 
@@ -470,7 +468,7 @@ async def test_a_persistent_checkpoint_write_failure_still_sleeps_on_a_full_batc
     async def fake_sleep(seconds):
         sleep_calls.append(seconds)
 
-    monkeypatch.setattr(PiholeCollector, "_run_sql", fake_run)
+    monkeypatch.setattr(PiholeCollector, "_run_remote", fake_run)
     monkeypatch.setattr("siem.collectors.pihole.get_checkpoint", fake_get)
     monkeypatch.setattr("siem.collectors.pihole.set_checkpoint", fake_set)
     monkeypatch.setattr("siem.collectors.pihole.get_es_client", fake_es_client)
@@ -491,7 +489,8 @@ async def test_a_persistent_checkpoint_write_failure_still_sleeps_on_a_full_batc
 
 
 @pytest.mark.asyncio
-async def test_run_sql_times_out_rather_than_hanging_forever(monkeypatch):
+@pytest.mark.timeout(5)
+async def test_run_remote_times_out_rather_than_hanging_forever(monkeypatch):
     """Regression: no timeout meant a wedged ssh/sudo session hung forever.
 
     BatchMode=yes suppresses ssh's own prompts, but not a remote sudo
@@ -528,7 +527,163 @@ async def test_run_sql_times_out_rather_than_hanging_forever(monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
     with pytest.raises(RuntimeError, match="timed out"):
-        await collector._run_sql("SELECT 1;")
+        await collector._run_remote("max")
 
     assert proc.killed is True
     assert proc.waited is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_collect_sends_only_the_verbs_the_forced_command_accepts(monkeypatch):
+    """Regression: the client used to send a whole shell command.
+
+    `sanctum-ftl-read` is an SSH forced command. It word-splits
+    SSH_ORIGINAL_COMMAND and accepts exactly `max`, `rows <after> <limit>`
+    and `backfill <days>`, exiting 2 on anything else. Sending
+    "sudo sqlite3 -readonly ... \"SELECT ...\"" made *every* fetch exit 2 --
+    which collect() caught, logged and retried for the life of the process
+    while is_running stayed True and event_count stayed 0. Pin the exact
+    strings so that mismatch cannot come back silently.
+    """
+    collector = PiholeCollector(
+        ssh_host="oracle", poll_seconds=0, batch_size=2, backfill_days=30
+    )
+    all_rows = {
+        10: _line(rowid="10", domain="a.example", status="2"),
+        11: _line(rowid="11", domain="b.example", status="1"),
+    }
+    sent = []
+
+    async def fake_run(self, verb):
+        sent.append(verb)
+        if verb == "max":
+            return "11"
+        if verb.startswith("backfill "):
+            return "10\n"
+        _, after, limit = verb.split()
+        due = [all_rows[k] for k in sorted(all_rows) if k > int(after)]
+        return "\n".join(due[: int(limit)])
+
+    async def fake_get(es, name):
+        return 0  # unseeded -- forces the cold-start backfill lookup too
+
+    async def fake_set(es, name, value):
+        pass
+
+    async def fake_es_client():
+        return object()
+
+    monkeypatch.setattr(PiholeCollector, "_run_remote", fake_run)
+    monkeypatch.setattr("siem.collectors.pihole.get_checkpoint", fake_get)
+    monkeypatch.setattr("siem.collectors.pihole.set_checkpoint", fake_set)
+    monkeypatch.setattr("siem.collectors.pihole.get_es_client", fake_es_client)
+
+    collected = []
+    async for event in collector.collect():
+        collected.append(event)
+        if len(collected) == 2:
+            break
+
+    # Exactly the three verbs, spelled exactly as the far side parses them.
+    assert sent[:3] == ["backfill 30", "max", "rows 9 2"]
+    assert all(
+        v == "max" or v.startswith(("rows ", "backfill ")) for v in sent
+    ), sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_the_verb_reaches_ssh_as_one_unquoted_argument(monkeypatch):
+    """The verb is argv, not a shell string.
+
+    ssh joins its trailing arguments with spaces into SSH_ORIGINAL_COMMAND,
+    and the forced command splits that on spaces -- so the verb must arrive
+    as a single plain argument after "--", with no quoting or shell syntax
+    of ours anywhere in it.
+    """
+    collector = PiholeCollector(ssh_host="oracle", ssh_key="/keys/augury")
+    seen = {}
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"1275906\n", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        seen["argv"] = list(args)
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    assert (await collector._run_remote("rows 100 500")).strip() == "1275906"
+    assert seen["argv"] == [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        "-i", "/keys/augury", "--", "oracle", "rows 100 500",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_a_process_that_exits_during_the_kill_race_still_raises_timeout(
+    monkeypatch,
+):
+    """proc.kill() can lose the race and raise ProcessLookupError.
+
+    That would replace the intended RuntimeError with a confusing one from
+    the timeout handler itself, and skip the warning log.
+    """
+    collector = PiholeCollector(ssh_host="oracle")
+
+    class _VanishingProc:
+        returncode = None
+
+        def __init__(self):
+            self.waited = False
+
+        async def communicate(self):
+            await asyncio.sleep(10)
+            return b"", b""
+
+        def kill(self):
+            raise ProcessLookupError
+
+        async def wait(self):
+            self.waited = True
+
+    proc = _VanishingProc()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr("siem.collectors.pihole.SSH_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        await collector._run_remote("max")
+    assert proc.waited is True
+
+
+def test_a_batch_size_the_far_side_would_reject_fails_loudly_at_construction():
+    """sanctum-ftl-read exits 2 on a limit over 5000 or of five-plus digits.
+
+    Accepting such a PIHOLE_BATCH_SIZE would reproduce the exact silent
+    zero-ingest failure the verb protocol fix exists to remove, so it is
+    refused where a human is looking: at startup.
+    """
+    with pytest.raises(ValueError, match="batch_size"):
+        PiholeCollector(ssh_host="oracle", batch_size=5001)
+    with pytest.raises(ValueError, match="batch_size"):
+        PiholeCollector(ssh_host="oracle", batch_size=0)
+    with pytest.raises(ValueError, match="batch_size"):
+        PiholeCollector(ssh_host="oracle", batch_size=-1)
+    # The boundary itself is accepted -- 5000 is `-le 5000` and four digits.
+    assert PiholeCollector(ssh_host="oracle", batch_size=5000).batch_size == 5000
+
+
+def test_a_negative_backfill_window_is_refused():
+    # is_num() on the far side rejects a leading "-", so `backfill -1` would
+    # exit 2 on every cold start and the collector would never begin.
+    with pytest.raises(ValueError, match="backfill_days"):
+        PiholeCollector(ssh_host="oracle", backfill_days=-1)

@@ -82,7 +82,6 @@ def parse_ftl_line(line: str) -> Event | None:
 
 
 CHECKPOINT_NAME = "pihole_rowid"
-FTL_DB = "/etc/pihole/pihole-FTL.db"
 
 # Generous bound for a query over a home LAN: long enough for the sqlite3
 # call itself, short enough that a wedged ssh session (or a remote sudo
@@ -90,16 +89,18 @@ FTL_DB = "/etc/pihole/pihole-FTL.db"
 # forever with is_running still True and nothing logged.
 SSH_TIMEOUT_SECONDS = 30
 
-SELECT_ROWS = (
-    "SELECT id, timestamp, type, status, domain, client, "
-    "COALESCE(forward, ''), COALESCE(reply_type, 0) FROM queries "
-    "WHERE id > {after} ORDER BY id LIMIT {limit};"
-)
-SELECT_MAX = "SELECT COALESCE(MAX(id), 0) FROM queries;"
-SELECT_BACKFILL_START = (
-    "SELECT COALESCE(MIN(id), 0) FROM queries "
-    "WHERE timestamp > strftime('%s', 'now', '-{days} day');"
-)
+# The Oracle's reader (`sanctum-ftl-read`, behind an SSH forced command)
+# accepts exactly three verbs and exits 2 on anything else. It owns the SQL;
+# this side only ever sends one of these. Keep them in step with that script.
+VERB_MAX = "max"
+VERB_ROWS = "rows {after} {limit}"
+VERB_BACKFILL = "backfill {days}"
+
+# sanctum-ftl-read rejects a `rows` limit of five or more digits, and any
+# limit above 5000. A batch size outside that range makes every fetch exit 2
+# -- which collect() would log and retry forever while reporting healthy --
+# so it is rejected here, at construction, instead.
+MAX_BATCH_SIZE = 5000
 
 
 def _rowid_of(line: str) -> int | None:
@@ -155,23 +156,38 @@ class PiholeCollector(BaseCollector):
         self.ssh_host = ssh_host
         self.ssh_key = ssh_key
         self.poll_seconds = poll_seconds
-        # These land unquoted in a remote shell string (SELECT_ROWS' LIMIT,
-        # SELECT_BACKFILL_START's day count); coercing here is cheap
-        # insurance against that ever becoming an injection vector.
+        # These are interpolated into the verb string the forced command
+        # word-splits on spaces, so they must be plain integers -- and they
+        # must be integers the far side will actually accept. A value it
+        # rejects costs nothing at construction and everything at runtime,
+        # where it looks exactly like a healthy collector reading no data.
         self.batch_size = int(batch_size)
         self.backfill_days = int(backfill_days)
+        if not 1 <= self.batch_size <= MAX_BATCH_SIZE:
+            raise ValueError(
+                f"pihole batch_size must be between 1 and {MAX_BATCH_SIZE}, "
+                f"got {self.batch_size}"
+            )
+        if self.backfill_days < 0:
+            raise ValueError(
+                f"pihole backfill_days must not be negative, "
+                f"got {self.backfill_days}"
+            )
 
-    async def _run_sql(self, sql: str) -> str:
-        """Run one statement against the Oracle's FTL database over SSH."""
+    async def _run_remote(self, verb: str) -> str:
+        """Run one of the Oracle reader's three verbs over SSH.
+
+        The far side is `sanctum-ftl-read` behind an SSH forced command: it
+        owns the database path, the SQL and the separator, and accepts only
+        `max`, `rows <after> <limit>` and `backfill <days>`. What travels is
+        the verb, not a shell command -- so there is no remote quoting to get
+        wrong and nothing here depends on the login shell being bash.
+        """
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
         if self.ssh_key:
             cmd += ["-i", self.ssh_key]
         # "--" so a hostname beginning with "-" can't be read as an ssh option.
-        cmd += [
-            "--",
-            self.ssh_host,
-            f"sudo sqlite3 -readonly -separator $'\\x1f' {FTL_DB} \"{sql}\"",
-        ]
+        cmd += ["--", self.ssh_host, verb]
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -184,7 +200,14 @@ class PiholeCollector(BaseCollector):
                 proc.communicate(), timeout=SSH_TIMEOUT_SECONDS
             )
         except TimeoutError:
-            proc.kill()
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                # It exited in the race between the timeout firing and the
+                # kill. Nothing to kill; still reap it, then raise the
+                # RuntimeError the caller expects rather than a stray
+                # ProcessLookupError from this handler.
+                pass
             await proc.wait()
             logger.warning(
                 "pihole_ssh_timeout",
@@ -195,6 +218,8 @@ class PiholeCollector(BaseCollector):
                 f"pihole query timed out after {SSH_TIMEOUT_SECONDS}s"
             ) from None
         if proc.returncode != 0:
+            # Exit 2 from the forced command means it did not recognise the
+            # verb -- i.e. this client and that script have drifted apart.
             raise RuntimeError(
                 f"pihole query failed ({proc.returncode}): "
                 f"{stderr.decode(errors='replace').strip()}"
@@ -203,8 +228,8 @@ class PiholeCollector(BaseCollector):
 
     async def _starting_point(self) -> int:
         """Bound a cold start to backfill_days rather than the whole database."""
-        out = await self._run_sql(
-            SELECT_BACKFILL_START.format(days=self.backfill_days)
+        out = await self._run_remote(
+            VERB_BACKFILL.format(days=self.backfill_days)
         )
         first = out.strip().splitlines()
         start = int(first[0]) if first and first[0].strip().isdigit() else 0
@@ -251,7 +276,7 @@ class PiholeCollector(BaseCollector):
                     continue
 
             try:
-                max_rowid = int((await self._run_sql(SELECT_MAX)).strip() or 0)
+                max_rowid = int((await self._run_remote(VERB_MAX)).strip() or 0)
                 reset = next_checkpoint(cursor, max_rowid)
                 if reset != cursor:
                     # The database is not the one we were reading (FTL
@@ -269,8 +294,8 @@ class PiholeCollector(BaseCollector):
                             "pihole_checkpoint_write_error", host=self.ssh_host
                         )
 
-                out = await self._run_sql(
-                    SELECT_ROWS.format(after=cursor, limit=self.batch_size)
+                out = await self._run_remote(
+                    VERB_ROWS.format(after=cursor, limit=self.batch_size)
                 )
             except Exception:
                 logger.exception("pihole_fetch_error", host=self.ssh_host)
@@ -299,11 +324,13 @@ class PiholeCollector(BaseCollector):
                 yield event
 
             if out.strip() and yielded == 0:
-                # Either every row in a non-empty batch was malformed, or
-                # (more likely on a non-bash login shell) the remote
-                # $'\x1f' ANSI-C quoting wasn't expanded and every field
-                # count check is failing. Either way this is worth a human
-                # noticing.
+                # Every row in a non-empty batch was rejected by
+                # parse_ftl_line. The separator is no longer a suspect --
+                # the forced command builds it with printf '\037' on its
+                # own side, so no login shell of ours has to expand
+                # anything -- which leaves genuinely malformed rows, or the
+                # far side's row shape having changed. Worth a human
+                # noticing either way.
                 logger.warning(
                     "pihole_batch_all_unparseable", host=self.ssh_host
                 )
