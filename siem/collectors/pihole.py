@@ -84,6 +84,12 @@ def parse_ftl_line(line: str) -> Event | None:
 CHECKPOINT_NAME = "pihole_rowid"
 FTL_DB = "/etc/pihole/pihole-FTL.db"
 
+# Generous bound for a query over a home LAN: long enough for the sqlite3
+# call itself, short enough that a wedged ssh session (or a remote sudo
+# unexpectedly reading a password from stdin) doesn't hang the collector
+# forever with is_running still True and nothing logged.
+SSH_TIMEOUT_SECONDS = 30
+
 SELECT_ROWS = (
     "SELECT id, timestamp, type, status, domain, client, "
     "COALESCE(forward, ''), COALESCE(reply_type, 0) FROM queries "
@@ -94,6 +100,23 @@ SELECT_BACKFILL_START = (
     "SELECT COALESCE(MIN(id), 0) FROM queries "
     "WHERE timestamp > strftime('%s', 'now', '-{days} day');"
 )
+
+
+def _rowid_of(line: str) -> int | None:
+    """Best-effort rowid extraction, independent of parse_ftl_line.
+
+    parse_ftl_line rejects a row for reasons that have nothing to do with
+    whether the rowid itself is readable (missing domain/client, wrong
+    field count from a partial line, etc). If a whole batch is rejected,
+    the collector must still be able to advance past it using the rowid
+    alone -- otherwise it re-fetches and re-rejects the same rows forever,
+    silently.
+    """
+    first = line.split(FTL_FIELD_SEP, 1)[0]
+    try:
+        return int(first)
+    except ValueError:
+        return None
 
 
 def next_checkpoint(current: int, max_rowid: int) -> int:
@@ -132,25 +155,45 @@ class PiholeCollector(BaseCollector):
         self.ssh_host = ssh_host
         self.ssh_key = ssh_key
         self.poll_seconds = poll_seconds
-        self.batch_size = batch_size
-        self.backfill_days = backfill_days
+        # These land unquoted in a remote shell string (SELECT_ROWS' LIMIT,
+        # SELECT_BACKFILL_START's day count); coercing here is cheap
+        # insurance against that ever becoming an injection vector.
+        self.batch_size = int(batch_size)
+        self.backfill_days = int(backfill_days)
 
     async def _run_sql(self, sql: str) -> str:
         """Run one statement against the Oracle's FTL database over SSH."""
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
         if self.ssh_key:
             cmd += ["-i", self.ssh_key]
+        # "--" so a hostname beginning with "-" can't be read as an ssh option.
         cmd += [
+            "--",
             self.ssh_host,
             f"sudo sqlite3 -readonly -separator $'\\x1f' {FTL_DB} \"{sql}\"",
         ]
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=SSH_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            logger.warning(
+                "pihole_ssh_timeout",
+                host=self.ssh_host,
+                timeout=SSH_TIMEOUT_SECONDS,
+            )
+            raise RuntimeError(
+                f"pihole query timed out after {SSH_TIMEOUT_SECONDS}s"
+            ) from None
         if proc.returncode != 0:
             raise RuntimeError(
                 f"pihole query failed ({proc.returncode}): "
@@ -183,14 +226,23 @@ class PiholeCollector(BaseCollector):
                 try:
                     if es is None:
                         es = await get_es_client()
-                    cursor = await get_checkpoint(es, CHECKPOINT_NAME)
-                    if cursor == 0:
-                        cursor = await self._starting_point()
+                    resolved = await get_checkpoint(es, CHECKPOINT_NAME)
+                    if resolved == 0:
+                        resolved = await self._starting_point()
                         logger.info(
                             "pihole_backfill_start",
-                            cursor=cursor,
+                            cursor=resolved,
                             days=self.backfill_days,
                         )
+                    # Commit to `cursor` only once both the checkpoint read
+                    # and (on a cold start) the backfill lookup have fully
+                    # succeeded. Assigning `cursor` from get_checkpoint
+                    # eagerly and only then calling _starting_point() would
+                    # leave `cursor == 0` if the latter raised -- not None
+                    # -- so this retry block would never re-fire and the
+                    # next pass would silently read the whole database
+                    # (WHERE id > 0) instead of the bounded backfill window.
+                    cursor = resolved
                 except Exception:
                     logger.exception(
                         "pihole_checkpoint_read_error", host=self.ssh_host
@@ -230,13 +282,33 @@ class PiholeCollector(BaseCollector):
             for line in out.splitlines():
                 if not line.strip():
                     continue
+                # Advance past a row by rowid even when parse_ftl_line
+                # rejects it (bad domain/client, wrong field count). A
+                # rowid is the SQL primary key, not user-controlled content,
+                # so it is readable independent of the rest of the row. If a
+                # whole batch is rejected, this is what keeps the collector
+                # from re-fetching and re-rejecting the same rows forever,
+                # silently.
+                row_id = _rowid_of(line)
+                if row_id is not None:
+                    highest = max(highest, row_id)
                 event = parse_ftl_line(line)
                 if event is None:
                     continue
-                highest = max(highest, event.parsed["ftl_rowid"])
                 yielded += 1
                 yield event
 
+            if out.strip() and yielded == 0:
+                # Either every row in a non-empty batch was malformed, or
+                # (more likely on a non-bash login shell) the remote
+                # $'\x1f' ANSI-C quoting wasn't expanded and every field
+                # count check is failing. Either way this is worth a human
+                # noticing.
+                logger.warning(
+                    "pihole_batch_all_unparseable", host=self.ssh_host
+                )
+
+            advanced = False
             if highest > cursor:
                 # Advance the in-memory cursor only once the write succeeds.
                 # If it fails, leave the cursor where it was so the next pass
@@ -249,8 +321,13 @@ class PiholeCollector(BaseCollector):
                     )
                 else:
                     cursor = highest
+                    advanced = True
                     logger.debug("pihole_batch", count=yielded, cursor=cursor)
 
-            # A full batch means we are behind; keep draining without sleeping.
-            if yielded < self.batch_size:
+            # A full batch means we are behind; keep draining without
+            # sleeping -- but only when the cursor actually advanced. A
+            # persistent checkpoint-write failure must still sleep, or it
+            # turns into a tight re-fetch/re-yield loop limited only by SSH
+            # round-trip time.
+            if yielded < self.batch_size or not advanced:
                 await asyncio.sleep(self.poll_seconds)
