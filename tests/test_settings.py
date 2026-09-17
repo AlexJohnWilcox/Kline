@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from config.settings import Settings
 
@@ -42,3 +43,65 @@ def test_pihole_defaults(declared_defaults):
 def test_retention_defaults_to_thirty_days(declared_defaults):
     assert declared_defaults.event_retention_days == 30
     assert declared_defaults.alert_retention_days == 365
+
+
+def test_pihole_batch_size_out_of_range_low(monkeypatch):
+    """PIHOLE_BATCH_SIZE=0 violates ge=1 constraint."""
+    for name in DEFAULTED:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+    monkeypatch.setenv("PIHOLE_BATCH_SIZE", "0")
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_env_file=None)
+    assert "pihole_batch_size" in str(exc_info.value)
+
+
+def test_pihole_batch_size_out_of_range_high(monkeypatch):
+    """PIHOLE_BATCH_SIZE=5001 violates le=5000 constraint."""
+    for name in DEFAULTED:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+    monkeypatch.setenv("PIHOLE_BATCH_SIZE", "5001")
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_env_file=None)
+    assert "pihole_batch_size" in str(exc_info.value)
+
+
+def test_pihole_batch_size_valid_bounds(monkeypatch):
+    """Valid PIHOLE_BATCH_SIZE values construct fine."""
+    for name in DEFAULTED:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+    # Test boundary values
+    monkeypatch.setenv("PIHOLE_BATCH_SIZE", "1")
+    s = Settings(_env_file=None)
+    assert s.pihole_batch_size == 1
+
+    monkeypatch.setenv("PIHOLE_BATCH_SIZE", "5000")
+    s = Settings(_env_file=None)
+    assert s.pihole_batch_size == 5000
+
+
+def test_pihole_backfill_days_out_of_range_zero(monkeypatch):
+    """PIHOLE_BACKFILL_DAYS=0 violates ge=1 constraint."""
+    for name in DEFAULTED:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+    monkeypatch.setenv("PIHOLE_BACKFILL_DAYS", "0")
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_env_file=None)
+    assert "pihole_backfill_days" in str(exc_info.value)
+
+
+def test_pihole_backfill_days_valid(monkeypatch):
+    """Valid PIHOLE_BACKFILL_DAYS values construct fine."""
+    for name in DEFAULTED:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+    monkeypatch.setenv("PIHOLE_BACKFILL_DAYS", "1")
+    s = Settings(_env_file=None)
+    assert s.pihole_backfill_days == 1
+
+    monkeypatch.setenv("PIHOLE_BACKFILL_DAYS", "365")
+    s = Settings(_env_file=None)
+    assert s.pihole_backfill_days == 365

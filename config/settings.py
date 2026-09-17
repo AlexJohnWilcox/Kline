@@ -40,8 +40,13 @@ class Settings(BaseSettings):
     pihole_ssh_host: str = "oracle"
     pihole_ssh_key: str | None = None
     pihole_poll_seconds: int = 30
-    pihole_batch_size: int = 500
-    pihole_backfill_days: int = 30
+    # Bounds match the Oracle reader's accept range; violation surfaces as a
+    # pydantic error naming PIHOLE_BATCH_SIZE before ES client init, rather than
+    # a bare ValueError partway through the FastAPI lifespan.
+    pihole_batch_size: int = Field(default=500, ge=1, le=5000)
+    # Backfill zero means "read from rowid 0", which the reader interprets as
+    # "entire database" (~1.28 million rows). ge=1 forbids the trap.
+    pihole_backfill_days: int = Field(default=30, ge=1)
 
     # Auth
     # If SESSION_SECRET is unset, a random one is generated per process
