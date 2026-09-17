@@ -69,10 +69,19 @@ async def index_events_bulk(es: AsyncElasticsearch, events: list[Event]) -> int:
     if not events:
         return 0
 
-    index = get_event_index()
     operations: list[dict[str, Any]] = []
     for event in events:
-        operations.append({"index": {"_index": index, "_id": event.id}})
+        # Route on the event's own timestamp, not on now(). Event indices
+        # are daily so that retention can express "30 days"; computing one
+        # index for the whole batch at ingest time breaks that for anything
+        # not happening right now. A 30-day cold-start backfill would land
+        # ~1.5M rows spanning a month in a single siem-events-<today>, which
+        # retention then holds for 30 days from ingest -- up to ~60 days of
+        # event age in one index, which is the exact thing daily indices
+        # were introduced to stop.
+        operations.append(
+            {"index": {"_index": get_event_index(event.timestamp), "_id": event.id}}
+        )
         operations.append(event.to_es_doc())
 
     result = await es.bulk(operations=operations)

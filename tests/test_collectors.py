@@ -1,9 +1,14 @@
+import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
 
 from siem.collectors.docker import parse_docker_event
 from siem.collectors.file_watcher import default_parser, detect_severity, extract_timestamp
 from siem.collectors.network import parse_network_line
-from siem.models.event import EventCategory, EventSeverity
+from siem.models.event import Event, EventCategory, EventSeverity
+from siem.tasks.collector_runner import CollectorRunner
 
 
 # ── File watcher tests ──
@@ -158,3 +163,97 @@ def test_parse_conntrack():
 def test_parse_network_empty():
     assert parse_network_line("") is None
     assert parse_network_line("just some random text") is None
+
+
+# ── Bulk indexer visibility ──
+
+
+class _RecordingLogger:
+    """Captures structlog calls so the level of a message can be asserted."""
+
+    def __init__(self):
+        self.calls = []
+
+    def _record(self, level):
+        def log(event, **kw):
+            self.calls.append((level, event, kw))
+        return log
+
+    def __getattr__(self, name):
+        return self._record(name)
+
+    def levels_for(self, event):
+        return [c[0] for c in self.calls if c[1] == event]
+
+
+def test_a_partial_bulk_failure_warns_with_both_numbers(monkeypatch):
+    """Regression: a reduced count was only ever logged at debug.
+
+    index_events_bulk returns len(events) minus the rejected ones rather
+    than raising, and the runner never compared that to the batch size. A
+    mapping conflict or a run of 429s therefore sheds events at ~55k/day
+    with no signal above debug.
+    """
+    recorder = _RecordingLogger()
+    monkeypatch.setattr("siem.tasks.collector_runner.logger", recorder)
+
+    CollectorRunner._log_indexed("events_indexed", 87, 100)
+
+    assert recorder.levels_for("events_indexed") == []
+    level, event, kw = recorder.calls[0]
+    assert level == "warning"
+    assert event == "events_index_partial_failure"
+    # Both numbers, so the log says how much was lost and out of what.
+    assert kw == {"indexed": 87, "attempted": 100, "failed": 13}
+
+
+def test_a_fully_indexed_batch_stays_at_debug(monkeypatch):
+    recorder = _RecordingLogger()
+    monkeypatch.setattr("siem.tasks.collector_runner.logger", recorder)
+
+    CollectorRunner._log_indexed("events_indexed", 100, 100)
+
+    assert recorder.calls == [("debug", "events_indexed", {"count": 100})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_dropping_a_batch_on_an_indexer_error_warns_with_the_count(monkeypatch):
+    """The drop path loses up to 100 events; it must name the number."""
+    recorder = _RecordingLogger()
+    monkeypatch.setattr("siem.tasks.collector_runner.logger", recorder)
+
+    async def boom(es, events):
+        raise RuntimeError("es exploded")
+
+    async def fake_es_client():
+        return object()
+
+    monkeypatch.setattr("siem.tasks.collector_runner.index_events_bulk", boom)
+    monkeypatch.setattr("siem.tasks.collector_runner.get_es_client", fake_es_client)
+
+    runner = CollectorRunner()
+    for i in range(3):
+        runner._queue.put_nowait(
+            Event(
+                timestamp=datetime.now(UTC),
+                source="pihole",
+                message=f"e{i}",
+                host="h",
+            )
+        )
+
+    task = asyncio.create_task(runner._bulk_indexer())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if recorder.levels_for("events_dropped"):
+            break
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert recorder.levels_for("events_dropped") == ["warning"]
+    dropped = next(c for c in recorder.calls if c[1] == "events_dropped")
+    assert dropped[2] == {"count": 3}

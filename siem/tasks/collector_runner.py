@@ -66,14 +66,14 @@ class CollectorRunner:
 
                 # Index the batch
                 count = await index_events_bulk(es, batch)
-                logger.debug("events_indexed", count=count)
+                self._log_indexed("events_indexed", count, len(batch))
                 batch.clear()
 
             except asyncio.TimeoutError:
                 # Flush any partial batch on timeout
                 if batch:
                     count = await index_events_bulk(es, batch)
-                    logger.debug("events_indexed_flush", count=count)
+                    self._log_indexed("events_indexed_flush", count, len(batch))
                     batch.clear()
             except asyncio.CancelledError:
                 # Final flush on shutdown
@@ -81,8 +81,31 @@ class CollectorRunner:
                     await index_events_bulk(es, batch)
                 raise
             except Exception:
-                logger.exception("indexer_error")
+                # The batch is unrecoverable and is dropped. Say how much was
+                # lost: at ~55k events/day this is the one place data leaves
+                # the pipeline for good, and it must not be a bare line.
+                logger.exception("indexer_error", dropped=len(batch))
+                if batch:
+                    logger.warning("events_dropped", count=len(batch))
                 batch.clear()
+
+    @staticmethod
+    def _log_indexed(event: str, count: int, attempted: int) -> None:
+        """Log a bulk result, loudly when Elasticsearch rejected part of it.
+
+        index_events_bulk returns a reduced count on a partial failure rather
+        than raising. Logged only at debug, a steady trickle of rejected
+        documents -- a mapping conflict, or 429s under load -- is invisible.
+        """
+        if count < attempted:
+            logger.warning(
+                "events_index_partial_failure",
+                indexed=count,
+                attempted=attempted,
+                failed=attempted - count,
+            )
+        else:
+            logger.debug(event, count=count)
 
     def status(self) -> list[dict]:
         return [c.status() for c in self.collectors]
