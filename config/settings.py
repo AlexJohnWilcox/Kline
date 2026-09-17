@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     default_suppression_ttl_hours: int = 168  # 7 days
 
     # Retention
-    event_retention_days: int = 90
+    event_retention_days: int = 30
     alert_retention_days: int = 365
 
     # Auth

@@ -9,11 +9,43 @@ from siem.storage.es_client import get_es_client
 
 logger = structlog.get_logger()
 
-# Match index names like siem-events-2025.01 or siem-alerts-2025.03
-INDEX_DATE_PATTERN = re.compile(r"^siem-(events|alerts)-(\d{4})\.(\d{2})$")
+# Daily event indices (siem-events-2026.09.17) and monthly alert indices
+# (siem-alerts-2026.09). The day group is optional so both parse here.
+INDEX_DATE_PATTERN = re.compile(r"^siem-(events|alerts)-(\d{4})\.(\d{2})(?:\.(\d{2}))?$")
 
 # Run retention check once per day (in seconds)
 RETENTION_CHECK_INTERVAL = 86400
+
+
+def index_end_date(year: int, month: int, day: int | None) -> datetime:
+    """The exclusive end of the period an index covers.
+
+    A daily index ends the next day; a monthly one ends on the first of the
+    next month. Retention compares this against the cutoff, so an index is
+    only dropped once every document it could hold is older than the window.
+    """
+    if day is not None:
+        return datetime(year, month, day, tzinfo=UTC) + timedelta(days=1)
+    if month == 12:
+        return datetime(year + 1, 1, 1, tzinfo=UTC)
+    return datetime(year, month + 1, 1, tzinfo=UTC)
+
+
+def should_delete(
+    index_name: str, event_cutoff: datetime, alert_cutoff: datetime
+) -> bool:
+    """Whether an index is entirely older than its type's retention window."""
+    match = INDEX_DATE_PATTERN.match(index_name)
+    if not match:
+        return False
+
+    index_type = match.group(1)
+    year = int(match.group(2))
+    month = int(match.group(3))
+    day = int(match.group(4)) if match.group(4) else None
+
+    cutoff = event_cutoff if index_type == "events" else alert_cutoff
+    return index_end_date(year, month, day).date() < cutoff.date()
 
 
 async def cleanup_old_indices() -> dict[str, list[str]]:
@@ -41,25 +73,16 @@ async def cleanup_old_indices() -> dict[str, list[str]]:
         if not match:
             continue
 
-        index_type = match.group(1)  # "events" or "alerts"
-        year = int(match.group(2))
-        month = int(match.group(3))
+        if not should_delete(index_name, event_cutoff, alert_cutoff):
+            continue
 
-        # Index covers the entire month — use last day of month
-        if month == 12:
-            index_end = datetime(year + 1, 1, 1, tzinfo=UTC)
-        else:
-            index_end = datetime(year, month + 1, 1, tzinfo=UTC)
-
-        cutoff = event_cutoff if index_type == "events" else alert_cutoff
-
-        if index_end < cutoff:
-            try:
-                await es.indices.delete(index=index_name)
-                deleted[index_type].append(index_name)
-                logger.info("retention_deleted_index", index=index_name)
-            except Exception:
-                logger.exception("retention_delete_error", index=index_name)
+        index_type = match.group(1)
+        try:
+            await es.indices.delete(index=index_name)
+            deleted[index_type].append(index_name)
+            logger.info("retention_deleted_index", index=index_name)
+        except Exception:
+            logger.exception("retention_delete_error", index=index_name)
 
     if deleted["events"] or deleted["alerts"]:
         logger.info(
