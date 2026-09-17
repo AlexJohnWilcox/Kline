@@ -1,9 +1,19 @@
 from pathlib import Path
+from unittest.mock import AsyncMock
 
-from siem.detection.engine import build_rule_query, _condition_to_es_clause
+import pytest
+
+from siem.detection.engine import (
+    AI_SUPPRESSION_BUCKET_BUDGET,
+    DetectionEngine,
+    build_rule_query,
+    grouped_breaches,
+    _condition_to_es_clause,
+)
 from siem.detection.rule_loader import load_rules
 from siem.models.event import EventSeverity
 from siem.models.rule import DetectionRule, RuleCondition
+from siem.models.suppression import Suppression
 
 
 # ── Rule Loader tests ──
@@ -129,8 +139,6 @@ def test_build_rule_query_no_source():
     assert len(must) == 2
 
 
-from siem.models.suppression import Suppression
-
 
 def test_suppression_matches_alert_context():
     """Verify suppression matching works with the context format the engine produces."""
@@ -147,8 +155,6 @@ def test_suppression_matches_alert_context():
     context_miss = {"event_count": 6, "users": ["bob"], "hosts": ["myhost"]}
     assert s.matches_context(context_miss) is False
 
-
-from siem.detection.engine import grouped_breaches
 
 
 def _rule(**kw):
@@ -233,10 +239,6 @@ def test_grouped_breaches_prefers_key_as_string():
 
 
 # ── _evaluate_rule / _raise_alert split ──
-
-from unittest.mock import AsyncMock
-
-from siem.detection.engine import DetectionEngine
 
 
 async def test_evaluate_rule_ungrouped_calls_raise_alert_once_with_total():
@@ -418,3 +420,97 @@ async def test_evaluate_rule_grouped_case_variant_keys_do_not_share_hits():
     # Both buckets' hits were exact-matched locally — no re-query needed,
     # and critically, neither alert's hit list contains the other's event.
     assert mock_es.search.await_count == 1
+
+
+# ── AI suppression fallback budget ──
+
+
+class _SuppressionES:
+    """Returns N active suppressions that never match deterministically."""
+
+    def __init__(self, count=2):
+        self._count = count
+
+    async def search(self, index, body):
+        return {"hits": {"hits": [
+            {
+                "_id": f"s{i}",
+                "_source": {
+                    "rule_id": "dns-blocked-spike",
+                    "reason": "known-noisy client",
+                    # Deliberately unmatched by the contexts below, so every
+                    # call falls through to the AI step.
+                    "match_fields": {"host": "nowhere"},
+                    "source_alert_id": "a",
+                    "status": "active",
+                },
+            }
+            for i in range(self._count)
+        ]}}
+
+
+def _budget_engine(monkeypatch, calls):
+    engine = DetectionEngine()
+    engine._ai_suppression_budget = AI_SUPPRESSION_BUCKET_BUDGET
+
+    async def fake_es_client():
+        return _SuppressionES()
+
+    async def fake_ai_match(**kwargs):
+        calls.append(kwargs["alert_context"])
+        return False
+
+    monkeypatch.setattr("siem.detection.engine.get_es_client", fake_es_client)
+    monkeypatch.setattr(
+        "siem.ai.suppression_matcher.ai_match_suppression", fake_ai_match
+    )
+    return engine
+
+
+@pytest.mark.timeout(10)
+async def test_the_ai_suppression_fallback_is_bounded_per_rule_evaluation(monkeypatch):
+    """A grouped rule raises one alert per breaching bucket, and each one
+    runs _check_suppressions. The AI fallback loops the rule's active
+    suppressions at 10s a call, so at the 50-bucket cap an unbounded
+    fallback would block the 30s detection loop for a very long time.
+    """
+    calls = []
+    engine = _budget_engine(monkeypatch, calls)
+    rule = _rule(id="dns-blocked-spike", group_by="client")
+
+    for i in range(10):
+        assert await engine._check_suppressions(rule, {"clients": [str(i)]}) is None
+
+    # Two suppressions per budgeted bucket; buckets past the budget never
+    # reach the AI step at all.
+    assert len(calls) == AI_SUPPRESSION_BUCKET_BUDGET * 2
+
+
+async def test_each_rule_evaluation_starts_with_a_fresh_ai_budget(monkeypatch):
+    """The bound is per rule per pass, not a one-time allowance."""
+    calls = []
+    engine = _budget_engine(monkeypatch, calls)
+    engine._raise_alert = AsyncMock()
+    rule = _rule(group_by="client", threshold=20)
+
+    mock_es = AsyncMock()
+    mock_es.search = AsyncMock(
+        return_value={"hits": {"total": {"value": 0}, "hits": []}}
+    )
+
+    engine._ai_suppression_budget = 0
+    await engine._evaluate_rule(mock_es, rule)
+    assert engine._ai_suppression_budget == AI_SUPPRESSION_BUCKET_BUDGET
+
+
+async def test_a_deterministic_match_never_spends_ai_budget(monkeypatch):
+    """The cheap path still short-circuits, budget untouched."""
+    calls = []
+    engine = _budget_engine(monkeypatch, calls)
+    rule = _rule(id="dns-blocked-spike")
+
+    msg = await engine._check_suppressions(rule, {"hosts": ["nowhere"]})
+
+    assert msg is not None and "Auto-suppressed" in msg
+    assert calls == []
+    assert engine._ai_suppression_budget == AI_SUPPRESSION_BUCKET_BUDGET

@@ -23,6 +23,16 @@ TOP_LEVEL_FIELDS = ("source", "category", "severity", "host", "message", "tags")
 # truncation check below can never drift apart.
 GROUP_BY_BUCKET_SIZE = 50
 
+# How many breaching buckets of one rule evaluation may reach the AI
+# suppression fallback. That fallback loops the rule's active suppressions
+# and each ai_match_suppression call is bounded at 10s, so one bucket can
+# already cost far more than a detection interval; at the GROUP_BY_BUCKET_SIZE
+# cap of 50 it would block the 30s loop for the rest of the day. Buckets past
+# the budget still get the deterministic field match, which is the path that
+# actually resolves the common cases -- they just do not get the AI opinion
+# on this pass, and the next pass reconsiders them from scratch.
+AI_SUPPRESSION_BUCKET_BUDGET = 3
+
 
 def _resolve_field(name: str) -> str:
     """Map a rule's field name to its Elasticsearch path."""
@@ -129,6 +139,8 @@ class DetectionEngine:
         self._running = False
         self._last_reload: datetime = datetime.min.replace(tzinfo=UTC)
         self._last_expiry_check: datetime = datetime.min.replace(tzinfo=UTC)
+        # Reset per rule evaluation; see AI_SUPPRESSION_BUCKET_BUDGET.
+        self._ai_suppression_budget = AI_SUPPRESSION_BUCKET_BUDGET
 
     @property
     def rules(self) -> dict[str, DetectionRule]:
@@ -185,6 +197,8 @@ class DetectionEngine:
 
     async def _evaluate_rule(self, es: AsyncElasticsearch, rule: DetectionRule) -> None:
         """Evaluate a single rule against Elasticsearch."""
+        # One budget per rule per pass, spent by _check_suppressions below.
+        self._ai_suppression_budget = AI_SUPPRESSION_BUCKET_BUDGET
         query = build_rule_query(rule)
         result = await es.search(index="siem-events-*", body=query)
         hits = result["hits"]["hits"]
@@ -484,7 +498,19 @@ class DetectionEngine:
                 logger.info("suppression_deterministic_match", suppression_id=s.id, rule_id=rule.id)
                 return f"Auto-suppressed: {s.reason} (suppression {s.id})"
 
-        # Step 2: AI fallback
+        # Step 2: AI fallback, but only while this rule evaluation has budget
+        # left. A grouped rule raises one alert per breaching bucket and each
+        # one lands here; unbounded, that serialises 10s-a-piece AI calls
+        # inside a 30s detection loop.
+        if self._ai_suppression_budget <= 0:
+            logger.warning(
+                "suppression_ai_budget_exhausted",
+                rule_id=rule.id,
+                budget=AI_SUPPRESSION_BUCKET_BUDGET,
+            )
+            return None
+        self._ai_suppression_budget -= 1
+
         try:
             from siem.ai.suppression_matcher import ai_match_suppression
 
