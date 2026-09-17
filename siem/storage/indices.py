@@ -96,14 +96,16 @@ USER_INDEX_TEMPLATE = {
 }
 
 
-def get_event_index() -> str:
-    """Get the current month's event index name."""
-    return f"siem-events-{datetime.now(UTC).strftime('%Y.%m')}"
+def get_event_index(when: datetime | None = None) -> str:
+    """Event indices are daily, so a 30-day retention window can be expressed."""
+    when = when or datetime.now(UTC)
+    return f"siem-events-{when.strftime('%Y.%m.%d')}"
 
 
-def get_alert_index() -> str:
-    """Get the current month's alert index name."""
-    return f"siem-alerts-{datetime.now(UTC).strftime('%Y.%m')}"
+def get_alert_index(when: datetime | None = None) -> str:
+    """Alert indices stay monthly — they live a year and are small."""
+    when = when or datetime.now(UTC)
+    return f"siem-alerts-{when.strftime('%Y.%m')}"
 
 
 async def setup_indices(es: AsyncElasticsearch) -> None:
