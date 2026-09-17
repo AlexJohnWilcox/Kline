@@ -95,6 +95,22 @@ USER_INDEX_TEMPLATE = {
     },
 }
 
+STATE_INDEX_TEMPLATE = {
+    "index_patterns": ["siem-state"],
+    "template": {
+        "settings": {
+            "number_of_shards": 1,
+            "number_of_replicas": 0,
+        },
+        "mappings": {
+            "properties": {
+                "value": {"type": "long"},
+                "updated_at": {"type": "date"},
+            }
+        },
+    },
+}
+
 
 def get_event_index(when: datetime | None = None) -> str:
     """Event indices are daily, so a 30-day retention window can be expressed."""
@@ -133,3 +149,9 @@ async def setup_indices(es: AsyncElasticsearch) -> None:
         body=USER_INDEX_TEMPLATE,
     )
     logger.info("index_template_created", name="siem-users")
+
+    await es.indices.put_index_template(
+        name="siem-state",
+        body=STATE_INDEX_TEMPLATE,
+    )
+    logger.info("index_template_created", name="siem-state")
