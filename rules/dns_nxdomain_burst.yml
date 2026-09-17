@@ -1,0 +1,17 @@
+id: dns-nxdomain-burst
+name: NXDOMAIN Burst From One Client
+description: >
+  One client is resolving many names that do not exist. Typical of a
+  domain-generation algorithm hunting for a live command-and-control
+  host, and also of a misconfigured search domain.
+severity: high
+source: pihole
+category: dns
+group_by: client
+conditions:
+  - field: nxdomain
+    operator: eq
+    value: true
+threshold: 40
+window_seconds: 300
+tags: [dns, nxdomain, dga]

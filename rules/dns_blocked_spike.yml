@@ -1,0 +1,17 @@
+id: dns-blocked-spike
+name: Blocked DNS Spike From One Client
+description: >
+  A single client is having an unusual number of DNS queries blocked.
+  Normal for a browser hitting a page full of trackers; sustained, it is
+  a device beaconing to something on the blocklist.
+severity: medium
+source: pihole
+category: dns
+group_by: client
+conditions:
+  - field: blocked
+    operator: eq
+    value: true
+threshold: 60
+window_seconds: 300
+tags: [dns, blocked, beaconing]
