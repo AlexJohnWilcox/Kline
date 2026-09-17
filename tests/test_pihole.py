@@ -1,3 +1,5 @@
+from pydantic import ValidationError
+
 from siem.collectors.pihole import FTL_FIELD_SEP, parse_ftl_line
 from siem.models.event import EventCategory, EventSeverity
 
@@ -687,3 +689,21 @@ def test_a_negative_backfill_window_is_refused():
     # exit 2 on every cold start and the collector would never begin.
     with pytest.raises(ValueError, match="backfill_days"):
         PiholeCollector(ssh_host="oracle", backfill_days=-1)
+
+
+def test_an_event_pydantic_refuses_is_skipped_not_raised(monkeypatch):
+    """The last path by which an exception could escape collect().
+
+    parse_ftl_line validates every field it reads, so Event() should never
+    refuse one -- but "should never" is how a collector ends up stopped for
+    the life of the process. If the model gains a constraint this parser
+    does not know about, the row is dropped like any other malformed row.
+    """
+    import siem.collectors.pihole as mod
+
+    class _Refusing:
+        def __init__(self, *a, **kw):
+            raise ValidationError.from_exception_data("Event", [])
+
+    monkeypatch.setattr(mod, "Event", _Refusing)
+    assert parse_ftl_line(_line()) is None

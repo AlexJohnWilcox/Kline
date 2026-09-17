@@ -1,6 +1,31 @@
 from config.settings import settings
 from siem.detection.engine import build_rule_query
 from siem.detection.rule_loader import load_rules
+from siem.storage.indices import EVENT_INDEX_TEMPLATE
+
+
+def explicitly_mapped_fields() -> set[str]:
+    """Field names a terms aggregation can safely group on.
+
+    Every property declared under `parsed` (keyword, integer, boolean, long
+    — all aggregatable), plus the top-level properties declared keyword.
+    `message` and `raw` are text and are correctly excluded: those are the
+    ones that would throw a fielddata error.
+    """
+    properties = EVENT_INDEX_TEMPLATE["template"]["mappings"]["properties"]
+    fields = {
+        name for name, spec in properties.items()
+        if spec.get("type") == "keyword"
+    }
+    fields |= set(properties["parsed"]["properties"])
+    return fields
+
+
+def test_the_allowlist_comes_from_the_index_template():
+    fields = explicitly_mapped_fields()
+    assert {"domain", "client", "query_type", "upstream"} <= fields  # parsed.*
+    assert {"host", "source", "severity", "category"} <= fields  # top-level
+    assert "message" not in fields and "raw" not in fields  # text, unsafe
 
 
 def test_every_rule_file_parses():
@@ -26,10 +51,12 @@ def test_every_rule_groups_on_an_explicitly_mapped_field():
 
     The terms aggregation then throws a fielddata error, which
     _evaluate_all_rules swallows — so the rule would log once per interval
-    and silently never fire. Only fields declared keyword in
-    EVENT_INDEX_TEMPLATE are safe to group on.
+    and silently never fire. Only fields declared in EVENT_INDEX_TEMPLATE
+    are safe to group on, so the allowlist is read from the template rather
+    than kept by hand — otherwise a legitimate `group_by: severity` or
+    `category` would fail here for no reason anyone could act on.
     """
-    mapped = {"domain", "client", "query_type", "upstream", "host", "source"}
+    mapped = explicitly_mapped_fields()
     for rule in load_rules(settings.rules_dir):
         if rule.group_by:
             bare = rule.group_by.removeprefix("parsed.")

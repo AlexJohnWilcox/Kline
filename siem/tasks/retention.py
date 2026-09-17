@@ -45,6 +45,14 @@ def should_delete(
     day = int(match.group(4)) if match.group(4) else None
 
     cutoff = event_cutoff if index_type == "events" else alert_cutoff
+    # Compare dates, not instants, deliberately -- and not by accident of
+    # the plan, which said instants. RETENTION_CHECK_INTERVAL is a plain
+    # sleep(86400) anchored to whenever the process last started, so an
+    # instant comparison would make "is this index old enough" depend on
+    # the time of day the loop happens to fire: an index could survive one
+    # pass and die on the next purely because the app was restarted at a
+    # different hour. Truncating to dates costs up to ~24h of extra
+    # retention and buys a decision that is the same whenever it is made.
     return index_end_date(year, month, day).date() < cutoff.date()
 
 

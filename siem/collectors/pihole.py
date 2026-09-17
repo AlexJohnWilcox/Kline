@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import structlog
+from pydantic import ValidationError
 
 from siem.collectors.base import BaseCollector
 from siem.models.event import Event, EventCategory, EventSeverity
@@ -58,27 +59,37 @@ def parse_ftl_line(line: str) -> Event | None:
 
     blocked = status_code in FTL_BLOCKED_STATUSES
 
-    return Event(
-        timestamp=timestamp,
-        source="pihole",
-        host=client,
-        severity=EventSeverity.MEDIUM if blocked else EventSeverity.LOW,
-        category=EventCategory.DNS,
-        message=domain,
-        parsed={
-            "domain": domain,
-            "client": client,
-            "status": status_code,
-            "blocked": blocked,
-            "reply_type": reply_code,
-            "nxdomain": reply_code == FTL_REPLY_NXDOMAIN,
-            "query_type": FTL_QUERY_TYPES.get(type_code, "OTHER"),
-            "upstream": forward or None,
-            "ftl_rowid": row_id,
-        },
-        tags=["dns", "blocked"] if blocked else ["dns"],
-        raw=line,
-    )
+    try:
+        return Event(
+            timestamp=timestamp,
+            source="pihole",
+            host=client,
+            severity=EventSeverity.MEDIUM if blocked else EventSeverity.LOW,
+            category=EventCategory.DNS,
+            message=domain,
+            parsed={
+                "domain": domain,
+                "client": client,
+                "status": status_code,
+                "blocked": blocked,
+                "reply_type": reply_code,
+                "nxdomain": reply_code == FTL_REPLY_NXDOMAIN,
+                "query_type": FTL_QUERY_TYPES.get(type_code, "OTHER"),
+                "upstream": forward or None,
+                "ftl_rowid": row_id,
+            },
+            tags=["dns", "blocked"] if blocked else ["dns"],
+            raw=line,
+        )
+    except ValidationError:
+        # Unreachable given the checks above -- but it is the last remaining
+        # path by which an exception escapes collect(), and an exception out
+        # of collect() stops the collector for the life of the process. That
+        # is the single failure mode every other guard in this module exists
+        # to prevent, so a row Event refuses is skipped like any other
+        # malformed row rather than taking the feed down with it.
+        logger.warning("pihole_event_rejected", domain=domain, client=client)
+        return None
 
 
 CHECKPOINT_NAME = "pihole_rowid"
