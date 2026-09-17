@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     event_retention_days: int = 30
     alert_retention_days: int = 365
 
+    # Pi-hole collector (pulls the Oracle's FTL database over SSH)
+    pihole_enabled: bool = False
+    pihole_ssh_host: str = "oracle"
+    pihole_ssh_key: str | None = None
+    pihole_poll_seconds: int = 30
+    pihole_batch_size: int = 500
+    pihole_backfill_days: int = 30
+
     # Auth
     # If SESSION_SECRET is unset, a random one is generated per process
     # (sessions invalidate on restart). Set it in .env for stable sessions.

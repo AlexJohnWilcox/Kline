@@ -12,6 +12,7 @@ from config.settings import settings
 from siem.auth import seed_admin_if_missing
 from siem.collectors.docker import DockerCollector
 from siem.collectors.network import NetworkCollector
+from siem.collectors.pihole import PiholeCollector
 from siem.collectors.syslog import SyslogCollector
 from siem.detection.engine import DetectionEngine
 from siem.ai.client import close_ollama_client, get_ollama_client
@@ -47,6 +48,16 @@ async def lifespan(app: FastAPI):
     collector_runner.register(SyslogCollector())
     collector_runner.register(DockerCollector())
     collector_runner.register(NetworkCollector())
+    if settings.pihole_enabled:
+        collector_runner.register(
+            PiholeCollector(
+                ssh_host=settings.pihole_ssh_host,
+                ssh_key=settings.pihole_ssh_key,
+                poll_seconds=settings.pihole_poll_seconds,
+                batch_size=settings.pihole_batch_size,
+                backfill_days=settings.pihole_backfill_days,
+            )
+        )
     await collector_runner.start()
 
     # Start detection engine
