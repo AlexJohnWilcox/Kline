@@ -380,3 +380,41 @@ async def test_evaluate_rule_grouped_requery_failure_yields_empty_hits():
     engine._raise_alert.assert_awaited_once_with(
         mock_es, rule, [], "192.168.10.241", 5000
     )
+
+
+async def test_evaluate_rule_grouped_case_variant_keys_do_not_share_hits():
+    """ES keyword buckets are case-sensitive: "Host-A" and "host-a" are
+    distinct breaching buckets. A case-insensitive local filter would let
+    each one's hits leak into the other's alert (and thus into
+    suppression matching) — exactly the contamination the re-query fix
+    was meant to remove, just reintroduced between case variants."""
+    engine = DetectionEngine()
+    engine._raise_alert = AsyncMock()
+    rule = _rule(group_by="host", threshold=1)
+
+    hit_upper = {"_id": "A", "_source": {
+        "host": "Host-A", "parsed": {"blocked": True},
+    }}
+    hit_lower = {"_id": "b", "_source": {
+        "host": "host-a", "parsed": {"blocked": True},
+    }}
+
+    mock_es = AsyncMock()
+    mock_es.search = AsyncMock(
+        return_value={
+            "hits": {"total": {"value": 2}, "hits": [hit_upper, hit_lower]},
+            "aggregations": {"groups": {"buckets": [
+                {"key": "Host-A", "doc_count": 1},
+                {"key": "host-a", "doc_count": 1},
+            ]}},
+        }
+    )
+
+    await engine._evaluate_rule(mock_es, rule)
+
+    assert engine._raise_alert.await_count == 2
+    engine._raise_alert.assert_any_await(mock_es, rule, [hit_upper], "Host-A", 1)
+    engine._raise_alert.assert_any_await(mock_es, rule, [hit_lower], "host-a", 1)
+    # Both buckets' hits were exact-matched locally — no re-query needed,
+    # and critically, neither alert's hit list contains the other's event.
+    assert mock_es.search.await_count == 1

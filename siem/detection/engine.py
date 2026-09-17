@@ -204,15 +204,24 @@ class DetectionEngine:
                 )
 
             for key, count in grouped_breaches(result, rule.threshold):
+                # Exact match, matching the re-query's exact `term` filter
+                # below — ES keyword buckets are case-sensitive ("Host-A"
+                # and "host-a" are distinct buckets), so this must not
+                # case-fold or two case-variant buckets would share hits.
+                # A boolean group_by field (key_as_string vs Python True)
+                # simply misses here and falls through to the re-query,
+                # which resolves it correctly.
                 bucket_hits = [
                     h for h in hits
-                    if str(self._hit_field(h, rule.group_by)).lower() == str(key).lower()
+                    if str(self._hit_field(h, rule.group_by)) == str(key)
                 ]
                 if not bucket_hits:
                     # The window's top-100-by-recency page didn't include this
                     # bucket's own events (common once a client's doc_count
-                    # exceeds 100). Re-query narrowed to this bucket rather
-                    # than attach another client's events as evidence.
+                    # exceeds 100, or when the local filter above can't match
+                    # e.g. a boolean group_by field). Re-query narrowed to
+                    # this bucket rather than attach another client's events
+                    # as evidence.
                     bucket_hits = await self._fetch_bucket_hits(es, rule, key)
                 await self._raise_alert(es, rule, bucket_hits, str(key), count)
             return
