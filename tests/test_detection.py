@@ -146,3 +146,64 @@ def test_suppression_matches_alert_context():
 
     context_miss = {"event_count": 6, "users": ["bob"], "hosts": ["myhost"]}
     assert s.matches_context(context_miss) is False
+
+
+from siem.detection.engine import grouped_breaches
+
+
+def _rule(**kw):
+    base = {
+        "id": "r", "name": "R", "description": "d", "severity": "medium",
+        "conditions": [RuleCondition(field="blocked", operator="eq", value=True)],
+        "threshold": 20, "window_seconds": 300,
+    }
+    base.update(kw)
+    return DetectionRule(**base)
+
+
+def test_group_by_defaults_to_none():
+    assert _rule().group_by is None
+
+
+def test_ungrouped_query_has_no_aggregation():
+    assert "aggs" not in build_rule_query(_rule())
+
+
+def test_grouped_query_aggregates_on_the_keyword_field():
+    query = build_rule_query(_rule(group_by="client"))
+    terms = query["aggs"]["groups"]["terms"]
+    assert terms["field"] == "parsed.client"
+    assert terms["min_doc_count"] == 20
+
+
+def test_grouped_query_passes_through_an_explicit_dot_path():
+    query = build_rule_query(_rule(group_by="host"))
+    assert query["aggs"]["groups"]["terms"]["field"] == "host"
+
+
+def test_grouped_breaches_returns_buckets_over_threshold():
+    response = {
+        "aggregations": {
+            "groups": {
+                "buckets": [
+                    {"key": "192.168.10.241", "doc_count": 55},
+                    {"key": "192.168.10.203", "doc_count": 21},
+                ]
+            }
+        }
+    }
+    assert grouped_breaches(response, threshold=20) == [
+        ("192.168.10.241", 55),
+        ("192.168.10.203", 21),
+    ]
+
+
+def test_grouped_breaches_excludes_buckets_under_threshold():
+    response = {"aggregations": {"groups": {"buckets": [
+        {"key": "a", "doc_count": 5},
+    ]}}}
+    assert grouped_breaches(response, threshold=20) == []
+
+
+def test_grouped_breaches_on_a_response_with_no_aggregation():
+    assert grouped_breaches({}, threshold=1) == []

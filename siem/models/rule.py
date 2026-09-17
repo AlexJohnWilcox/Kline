@@ -22,4 +22,5 @@ class DetectionRule(BaseModel):
     conditions: list[RuleCondition]
     threshold: int = 1
     window_seconds: int = 300
+    group_by: str | None = None  # dot-path to bucket on, e.g. "client"
     tags: list[str] = []

@@ -16,12 +16,19 @@ from siem.storage.indices import get_alert_index
 logger = structlog.get_logger()
 
 
+TOP_LEVEL_FIELDS = ("source", "category", "severity", "host", "message", "tags")
+
+
+def _resolve_field(name: str) -> str:
+    """Map a rule's field name to its Elasticsearch path."""
+    if "." in name or name in TOP_LEVEL_FIELDS:
+        return name
+    return f"parsed.{name}"
+
+
 def _condition_to_es_clause(cond: RuleCondition) -> dict[str, Any] | None:
     """Translate a RuleCondition to an Elasticsearch query clause."""
-    # For parsed.* fields, use the full dot-path
-    field = f"parsed.{cond.field}" if "." not in cond.field and cond.field not in (
-        "source", "category", "severity", "host", "message", "tags"
-    ) else cond.field
+    field = _resolve_field(cond.field)
 
     match cond.operator:
         case "eq":
@@ -65,11 +72,36 @@ def build_rule_query(rule: DetectionRule) -> dict[str, Any]:
     time_from = (datetime.now(UTC) - timedelta(seconds=rule.window_seconds)).isoformat()
     must.append({"range": {"timestamp": {"gte": time_from}}})
 
-    return {
+    query: dict[str, Any] = {
         "query": {"bool": {"must": must}},
         "size": 100,
         "sort": [{"timestamp": {"order": "desc"}}],
     }
+
+    if rule.group_by:
+        query["aggs"] = {
+            "groups": {
+                "terms": {
+                    "field": _resolve_field(rule.group_by),
+                    "size": 50,
+                    "min_doc_count": rule.threshold,
+                }
+            }
+        }
+
+    return query
+
+
+def grouped_breaches(response: dict[str, Any], threshold: int) -> list[tuple[str, int]]:
+    """Buckets that met the threshold, as (key, count), highest first."""
+    buckets = (
+        response.get("aggregations", {}).get("groups", {}).get("buckets", [])
+    )
+    return [
+        (b["key"], b["doc_count"])
+        for b in buckets
+        if b["doc_count"] >= threshold
+    ]
 
 
 class DetectionEngine:
@@ -148,11 +180,30 @@ class DetectionEngine:
         hits = result["hits"]["hits"]
         total = result["hits"]["total"]["value"]
 
+        # A grouped rule thresholds per bucket and raises one alert each.
+        if rule.group_by:
+            for key, count in grouped_breaches(result, rule.threshold):
+                bucket_hits = [
+                    h for h in hits
+                    if str(self._hit_field(h, rule.group_by)) == str(key)
+                ]
+                await self._raise_alert(es, rule, bucket_hits or hits, str(key), count)
+            return
+
         if total < rule.threshold:
             return
 
-        # Group key: for dedup, use the rule_id + a representative field
-        group_key = self._extract_group_key(hits)
+        await self._raise_alert(es, rule, hits, self._extract_group_key(hits), total)
+
+    async def _raise_alert(
+        self,
+        es: AsyncElasticsearch,
+        rule: DetectionRule,
+        hits: list[dict],
+        group_key: str,
+        match_count: int,
+    ) -> None:
+        """Create an alert for one rule breach, honouring cooldown and suppression."""
         cooldown_key = f"{rule.id}:{group_key}"
 
         # Check cooldown
@@ -173,7 +224,10 @@ class DetectionEngine:
                 rule_id=rule.id,
                 rule_name=rule.name,
                 severity=rule.severity,
-                description=f"{rule.description} ({total} events in {rule.window_seconds}s window)",
+                description=(
+                    f"{rule.description} "
+                    f"({match_count} events in {rule.window_seconds}s window)"
+                ),
                 matched_events=event_ids,
                 context=context,
                 status="resolved",
@@ -186,7 +240,12 @@ class DetectionEngine:
                 document=alert.to_es_doc(),
             )
             self._cooldowns[cooldown_key] = datetime.now(UTC)
-            logger.info("alert_suppressed", alert_id=alert.id, rule_id=rule.id, msg=suppression_msg)
+            logger.info(
+                "alert_suppressed",
+                alert_id=alert.id,
+                rule_id=rule.id,
+                msg=suppression_msg,
+            )
             return
 
         # Create normal alert
@@ -194,7 +253,10 @@ class DetectionEngine:
             rule_id=rule.id,
             rule_name=rule.name,
             severity=rule.severity,
-            description=f"{rule.description} ({total} events in {rule.window_seconds}s window)",
+            description=(
+                f"{rule.description} "
+                f"({match_count} events in {rule.window_seconds}s window)"
+            ),
             matched_events=event_ids,
             context=context,
         )
@@ -221,8 +283,22 @@ class DetectionEngine:
             alert_id=alert.id,
             rule_id=rule.id,
             rule_name=rule.name,
-            matched_events=total,
+            matched_events=match_count,
+            group_key=group_key,
         )
+
+    @staticmethod
+    def _hit_field(hit: dict, name: str):
+        """Read a rule's field from a hit, resolving bare names under parsed."""
+        source = hit.get("_source", {})
+        if "." in name:
+            cur = source
+            for part in name.split("."):
+                cur = (cur or {}).get(part)
+            return cur
+        if name in TOP_LEVEL_FIELDS:
+            return source.get(name)
+        return source.get("parsed", {}).get(name)
 
     def _extract_group_key(self, hits: list[dict]) -> str:
         """Extract a group key from matched events for dedup."""
