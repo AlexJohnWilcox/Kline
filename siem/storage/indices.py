@@ -24,6 +24,20 @@ EVENT_INDEX_TEMPLATE = {
                 "message": {"type": "text"},
                 "tags": {"type": "keyword"},
                 "raw": {"type": "text", "index": False},
+                "parsed": {
+                    "dynamic": True,
+                    "properties": {
+                        "domain": {"type": "keyword"},
+                        "client": {"type": "keyword"},
+                        "status": {"type": "integer"},
+                        "blocked": {"type": "boolean"},
+                        "reply_type": {"type": "integer"},
+                        "nxdomain": {"type": "boolean"},
+                        "query_type": {"type": "keyword"},
+                        "upstream": {"type": "keyword"},
+                        "ftl_rowid": {"type": "long"},
+                    },
+                },
             }
         },
     },

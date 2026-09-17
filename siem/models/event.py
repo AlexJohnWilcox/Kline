@@ -18,6 +18,7 @@ class EventCategory(str, Enum):
     NETWORK = "network"
     SYSTEM = "system"
     APPLICATION = "application"
+    DNS = "dns"
 
 
 class Event(BaseModel):
