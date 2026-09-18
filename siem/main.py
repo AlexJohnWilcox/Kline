@@ -242,6 +242,18 @@ async def page_settings(request: Request):
 
 @app.get("/api/v1/collectors/status")
 async def collectors_status() -> dict:
+    """Full collector status, blind_reason included.
+
+    The only handler for this path. A second one briefly lived in
+    siem/api/health.py returning a bare list; because the router is
+    included above, that one shadowed this and silently changed the
+    published {"collectors": [...]} shape for anything consuming it.
+
+    Authenticated, unlike /api/v1/health: the middleware above gates every
+    path not in _AUTH_PUBLIC_PATHS, and this one deliberately is not.
+    blind_reason names configured filesystem paths -- the detail an
+    operator needs and an anonymous caller has no business reading.
+    """
     return {"collectors": collector_runner.status()}
 
 

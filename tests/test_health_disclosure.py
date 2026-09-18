@@ -61,9 +61,11 @@ async def test_the_public_endpoint_still_degrades_on_blindness(blind_runner):
 
 @pytest.mark.asyncio
 async def test_the_authenticated_endpoint_keeps_the_reason(blind_runner):
-    collectors = await health_api.collectors_status()
+    import siem.main
 
-    assert "/var/log/gate.log" in collectors[0]["blind_reason"]
+    body = await siem.main.collectors_status()
+
+    assert "/var/log/gate.log" in body["collectors"][0]["blind_reason"]
 
 
 def test_the_detailed_endpoint_is_not_public():
