@@ -87,3 +87,24 @@ async def test_list_devices_still_returns_rows_when_the_resolver_could_not_be_bu
     assert result["devices"][0]["name"] is None
     assert result["names"] == {}
     assert result["resolved"] is False
+
+
+# ── httpx 0.28 deprecates verify=<str> ──
+
+
+@pytest.mark.filterwarnings("error::DeprecationWarning")
+def test_a_ca_path_is_passed_as_an_ssl_context_not_a_deprecated_string():
+    """verify=<str> warns today and goes away in a later httpx.
+
+    filterwarnings turns that DeprecationWarning into an error, so this test
+    fails against the string form rather than merely noting it in the run.
+    """
+    import ssl
+
+    import certifi
+
+    from siem.enrich.devices import DeviceResolver
+
+    resolver = build_resolver("https://dash.lan/data.json", certifi.where())
+    assert isinstance(resolver, DeviceResolver)
+    assert isinstance(resolver._client._transport._pool._ssl_context, ssl.SSLContext)

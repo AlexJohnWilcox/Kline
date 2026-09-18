@@ -6,6 +6,8 @@ already merges the two into the dashboard's data.json every 30 seconds. Kline
 reads that and nothing more.
 """
 
+import ssl
+
 import httpx
 import structlog
 from elasticsearch import NotFoundError
@@ -56,11 +58,19 @@ class DeviceResolver:
     def __init__(self, url: str, ca_path: str | None = None, timeout: float = 5.0):
         self.url = url
         self.names: dict[str, str] = {}
-        # Caddy serves dash.lan with its internal CA, so the system trust store
-        # cannot verify it. The root is published by the dashboard itself.
+        # Caddy serves dash.lan with its internal CA, and httpx verifies
+        # against certifi's bundle rather than the system trust store, so the
+        # root has to be handed over explicitly. The dashboard publishes it.
         # verify=False is not an option: this response names every device on
         # the network.
-        verify: object = ca_path if ca_path else True
+        #
+        # An SSLContext, not the bare path: httpx 0.28 deprecates verify=<str>
+        # and will drop it. create_default_context raises here for a missing
+        # or malformed file (FileNotFoundError / ssl.SSLError, both OSError),
+        # which is what api.devices.build_resolver already catches.
+        verify: ssl.SSLContext | bool = (
+            ssl.create_default_context(cafile=ca_path) if ca_path else True
+        )
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout, connect=3.0), verify=verify
         )
