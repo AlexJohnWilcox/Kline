@@ -39,7 +39,22 @@ EVENT_INDEX_TEMPLATE = {
                         "process": {"type": "keyword"},
                         "action": {"type": "keyword"},
                         "user": {"type": "keyword"},
-                        "src_ip": {"type": "ip"},
+                        # keyword, not ip. The parsers feed these from bare
+                        # regex captures with no validation, and demonstrably
+                        # emit values that are not addresses: _split_source
+                        # deliberately declines to split IPv6, so dropbear's
+                        # peer arrives as "2001:db8::1:53800", and sshd with
+                        # UseDNS writes "gate.lan" or "UNKNOWN". Elasticsearch
+                        # rejects the WHOLE DOCUMENT on a malformed `ip`;
+                        # ignore_malformed would instead drop just the field,
+                        # silently. keyword loses neither. Nothing performs
+                        # the CIDR queries `ip` was chosen for.
+                        "src_ip": {"type": "keyword"},
+                        # Mapped alongside src_ip. network.py writes them
+                        # together from the same regex; leaving this one
+                        # dynamic gave two adjacent fields of the same kind
+                        # different types.
+                        "dst_ip": {"type": "keyword"},
                         "src_port": {"type": "integer"},
                         "dst_port": {"type": "integer"},
                         "auth_method": {"type": "keyword"},
