@@ -170,6 +170,20 @@ DEVICE_INDEX_TEMPLATE = {
 }
 
 
+SEEN_INDEX_TEMPLATE = {
+    "index_patterns": ["siem-seen"],
+    "template": {
+        "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+        "mappings": {
+            "properties": {
+                "values": {"type": "keyword"},
+                "updated_at": {"type": "date"},
+            }
+        },
+    },
+}
+
+
 def get_event_index(when: datetime | None = None) -> str:
     """Event indices are daily, so a 30-day retention window can be expressed."""
     when = when or datetime.now(UTC)
@@ -219,3 +233,9 @@ async def setup_indices(es: AsyncElasticsearch) -> None:
         body=DEVICE_INDEX_TEMPLATE,
     )
     logger.info("index_template_created", name="siem-devices")
+
+    await es.indices.put_index_template(
+        name="siem-seen",
+        body=SEEN_INDEX_TEMPLATE,
+    )
+    logger.info("index_template_created", name="siem-seen")
