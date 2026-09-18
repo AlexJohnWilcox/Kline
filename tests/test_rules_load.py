@@ -67,3 +67,23 @@ def test_dns_rules_build_valid_grouped_queries():
     rules = {r.id: r for r in load_rules(settings.rules_dir)}
     query = build_rule_query(rules["dns-blocked-spike"])
     assert query["aggs"]["groups"]["terms"]["field"] == "parsed.client"
+
+
+def test_the_gate_rules_are_present():
+    rules = {r.id: r for r in load_rules(settings.rules_dir)}
+    assert "gate-egress-blocked" in rules
+    assert "tunnel-rotation-failed" in rules
+
+
+def test_the_gate_rules_read_the_syslog_source():
+    """They arrive via rsyslog into a file the syslog collector tails."""
+    rules = {r.id: r for r in load_rules(settings.rules_dir)}
+    for rule_id in ("gate-egress-blocked", "tunnel-rotation-failed"):
+        assert rules[rule_id].source == "syslog"
+
+
+def test_the_gate_rules_build_valid_queries():
+    rules = {r.id: r for r in load_rules(settings.rules_dir)}
+    for rule_id in ("gate-egress-blocked", "tunnel-rotation-failed"):
+        q = build_rule_query(rules[rule_id])
+        assert q["query"]["bool"]["must"]
