@@ -8,12 +8,18 @@ logger = structlog.get_logger()
 SEEN_INDEX = "siem-seen"
 
 
-async def load_seen(es, name: str) -> set[str]:
-    """Read a named set. Absent means empty, which is a legitimate first run."""
+async def load_seen(es, name: str) -> set[str] | None:
+    """Read a named set. None means the set has never been seeded.
+
+    An empty set is a real answer -- a seed run over a window with no
+    values -- and has to be distinguishable from an absent document.
+    Returning set() for both made check_new_clients re-seed on every pass
+    and never detect anything, forever, while logging success.
+    """
     try:
         doc = await es.get(index=SEEN_INDEX, id=name)
     except NotFoundError:
-        return set()
+        return None
     return set(doc["_source"].get("values") or [])
 
 
@@ -21,7 +27,7 @@ async def add_seen(es, name: str, values: set[str]) -> None:
     """Union new values into the set. A no-op when there is nothing to add."""
     if not values:
         return
-    current = await load_seen(es, name)
+    current = await load_seen(es, name) or set()
     merged = current | values
     if merged == current:
         return

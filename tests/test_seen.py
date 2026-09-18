@@ -25,8 +25,19 @@ class FakeES:
 
 
 @pytest.mark.asyncio
-async def test_an_absent_set_loads_as_empty_not_an_error():
-    assert await load_seen(FakeES(), "clients") == set()
+async def test_an_absent_set_loads_as_none_not_an_error():
+    """None, not set(): "never seeded" and "seeded, found nothing" are
+    different answers, and a caller that cannot tell them apart re-seeds
+    forever. See test_new_client_seeding."""
+    assert await load_seen(FakeES(), "clients") is None
+
+
+@pytest.mark.asyncio
+async def test_a_stored_but_empty_set_is_not_the_same_as_an_absent_one():
+    es = FakeES(stored=set())
+    loaded = await load_seen(es, "clients")
+    assert loaded is not None
+    assert loaded == set()
 
 
 @pytest.mark.asyncio

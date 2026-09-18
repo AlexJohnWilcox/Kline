@@ -36,9 +36,12 @@ async def find_new_clients(es, seen: set[str], hours: int) -> set[str]:
 async def check_new_clients(es) -> list[str]:
     """One pass. Seeds on first run, alerts on each genuinely new client."""
     seen = await load_seen(es, SEEN_NAME)
-    if not seen:
-        # First run. Adopt the existing population rather than alerting on all
-        # of it - see seed_seen_from_events.
+    if seen is None:
+        # First run only. `if not seen` also caught a seeded-but-empty set --
+        # NEW_CLIENT_ENABLED with PIHOLE_ENABLED off, say -- and re-seeded it
+        # every pass forever, so the detector never got past this line.
+        # Adopt the existing population rather than alerting on all of it;
+        # see seed_seen_from_events.
         await seed_seen_from_events(es, SEEN_NAME, CLIENT_FIELD,
                                     settings.new_client_seed_days)
         return []
