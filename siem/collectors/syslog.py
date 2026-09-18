@@ -76,7 +76,20 @@ _SEVERITY_ORDER = [
 ]
 
 # Patterns for categorizing and severity
-AUTH_PROCESSES = {"sshd", "sudo", "login", "su", "passwd", "useradd", "userdel", "groupadd"}
+# "dropbear" is the Gate's only SSH daemon. Without it here the category
+# stays SYSTEM, _extract_auth_fields is never called, and every auth line
+# from the router is filed as ordinary noise.
+AUTH_PROCESSES = {
+    "sshd",
+    "dropbear",
+    "sudo",
+    "login",
+    "su",
+    "passwd",
+    "useradd",
+    "userdel",
+    "groupadd",
+}
 FAILED_PATTERNS = re.compile(
     r"(?i)(fail|denied|error|invalid|unauthorized|rejected|refused|bad password)"
 )
@@ -193,6 +206,19 @@ def parse_syslog_line(line: str) -> Event | None:
     )
 
 
+def _split_source(addr: str) -> tuple[str, int | None]:
+    """Split dropbear's ``IP:PORT`` peer into its parts.
+
+    sshd writes ``1.2.3.4 port 22``; dropbear writes ``1.2.3.4:41234``.
+    An IPv6 peer carries colons of its own, so only the unambiguous
+    single-colon form is split — a whole address beats a truncated one.
+    """
+    host, sep, port = addr.rpartition(":")
+    if sep and host and ":" not in host and port.isdigit():
+        return host, int(port)
+    return addr, None
+
+
 def _extract_auth_fields(message: str, parsed: dict) -> None:
     """Extract common auth-related fields from the message."""
     # Failed password for user from IP
@@ -209,6 +235,43 @@ def _extract_auth_fields(message: str, parsed: dict) -> None:
         parsed["auth_method"] = m.group(1)
         parsed["user"] = m.group(2)
         parsed["src_ip"] = m.group(3)
+        parsed["action"] = "successful_login"
+        return
+
+    # dropbear: Bad password attempt for 'root' from 1.2.3.4:41234
+    # (also "Bad PAM password attempt" when PAM is compiled in)
+    m = re.search(r"Bad (?:PAM )?password attempt for '([^']*)' from (\S+)", message)
+    if m:
+        parsed["user"] = m.group(1)
+        parsed["src_ip"], port = _split_source(m.group(2))
+        if port is not None:
+            parsed["src_port"] = port
+        parsed["action"] = "failed_login"
+        return
+
+    # dropbear: Login attempt for nonexistent user from 1.2.3.4:41234
+    # The line carries no username. Leave "user" unset rather than invent one.
+    m = re.search(r"Login attempt for nonexistent user from (\S+)", message)
+    if m:
+        parsed["src_ip"], port = _split_source(m.group(1))
+        if port is not None:
+            parsed["src_port"] = port
+        parsed["action"] = "failed_login"
+        return
+
+    # dropbear: Pubkey auth succeeded for 'root' with ssh-ed25519 key
+    #           SHA256:... from 1.2.3.4:41234
+    # dropbear: Password auth succeeded for 'alex' from 1.2.3.4:41234
+    # The greedy .* is deliberate: the pubkey line's fingerprint sits between
+    # the username and the peer, so the peer must be taken from the LAST
+    # " from " in the line.
+    m = re.search(r"(Password|Pubkey) auth succeeded for '([^']*)'.* from (\S+)", message)
+    if m:
+        parsed["auth_method"] = m.group(1).lower()
+        parsed["user"] = m.group(2)
+        parsed["src_ip"], port = _split_source(m.group(3))
+        if port is not None:
+            parsed["src_port"] = port
         parsed["action"] = "successful_login"
         return
 

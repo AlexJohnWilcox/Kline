@@ -1,6 +1,6 @@
 id: brute-force-ssh
 name: SSH Brute Force Attempt
-description: Multiple failed SSH logins from same IP within 5 minutes
+description: Multiple failed SSH logins from the same IP within 5 minutes (sshd or dropbear)
 severity: high
 source: syslog
 category: auth
@@ -8,9 +8,9 @@ conditions:
   - field: action
     operator: eq
     value: failed_login
-  - field: service
-    operator: eq
-    value: sshd
+  - field: process
+    operator: regex
+    value: "sshd|dropbear"
 threshold: 5
 window_seconds: 300
 tags: [brute-force, ssh]
