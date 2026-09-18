@@ -1,0 +1,18 @@
+id: tunnel-rotation-failed
+name: A Road Failed To Carry Traffic
+description: >
+  rotate-road moved the tunnel to a new exit and the exit did not carry
+  traffic inside its verification window, so it rolled back. One is a bad
+  exit; a run of them is an upstream fault, because a dead WAN fails every
+  road in turn.
+severity: high
+source: syslog
+conditions:
+  - field: message
+    # phrase, not contains: contains is an OR over the terms, so this rule
+    # would raise a HIGH alert on any syslog line containing "not".
+    operator: phrase
+    value: "did not carry traffic"
+threshold: 1
+window_seconds: 900
+tags: [gate, tunnel, road]

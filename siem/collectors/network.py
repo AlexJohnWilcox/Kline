@@ -8,6 +8,7 @@ from typing import AsyncIterator
 import structlog
 
 from siem.collectors.base import BaseCollector
+from siem.collectors.path_health import MISSING_GRACE_PASSES, PathHealth
 from siem.models.event import Event, EventCategory, EventSeverity
 
 logger = structlog.get_logger()
@@ -241,6 +242,10 @@ class NetworkCollector(BaseCollector):
     Auto-discovers common log file locations on Linux systems.
     """
 
+    # Consecutive passes a watched path may be absent before the collector
+    # calls itself blind. See siem/collectors/path_health.py.
+    MISSING_GRACE_PASSES = MISSING_GRACE_PASSES
+
     def __init__(
         self,
         firewall_paths: list[Path] | None = None,
@@ -249,13 +254,25 @@ class NetworkCollector(BaseCollector):
         super().__init__(name="network")
         self.firewall_paths = firewall_paths or [p for p in FIREWALL_LOG_PATHS if p.exists()]
         self.dns_paths = dns_paths or [p for p in DNS_LOG_PATHS if p.exists()]
+        if not any(p.exists() for p in self.all_paths):
+            searched = (firewall_paths or FIREWALL_LOG_PATHS) + (dns_paths or DNS_LOG_PATHS)
+            self.mark_blind(
+                "no readable paths among: "
+                + ", ".join(str(p) for p in searched)
+            )
 
     @property
     def all_paths(self) -> list[Path]:
         return self.firewall_paths + self.dns_paths
 
     async def collect(self) -> AsyncIterator[Event]:
-        paths = [p for p in self.all_paths if p.exists()]
+        # Every configured path, present or not -- the same set syslog.py
+        # watches. Dropping the absent ones here is how a configured path
+        # that has not been created yet became invisible: it was filtered
+        # out before the loop that would have reported it missing.
+        # Auto-discovery has already filtered to existing paths in __init__,
+        # so this only widens the set for an explicitly configured one.
+        paths = self.all_paths
         if not paths:
             logger.warning(
                 "network_collector_no_files",
@@ -274,7 +291,17 @@ class NetworkCollector(BaseCollector):
             except OSError:
                 positions[path] = 0
 
+        # The same bookkeeping the syslog collector runs. Before this, a
+        # kern.log that existed but was root:adm 0640 -- the normal
+        # permission on Debian-family hosts -- read as "ok" forever.
+        health = PathHealth(
+            paths,
+            log_event="network_read_error",
+            grace_passes=self.MISSING_GRACE_PASSES,
+        )
+
         while True:
+            health.begin_pass()
             for path in paths:
                 try:
                     current_size = path.stat().st_size
@@ -283,7 +310,11 @@ class NetworkCollector(BaseCollector):
                     if current_size < last_pos:
                         last_pos = 0
 
-                    if current_size > last_pos:
+                    # >= rather than > : a file that never grows again after
+                    # priming is otherwise never opened, so a permission
+                    # revoked with no further writes never surfaces. The
+                    # extra open+seek-to-EOF on an unchanged file is a no-op.
+                    if current_size >= last_pos:
                         with open(path) as f:
                             f.seek(last_pos)
                             for line in f:
@@ -292,6 +323,10 @@ class NetworkCollector(BaseCollector):
                                     yield event
                             positions[path] = f.tell()
                 except OSError as e:
-                    logger.warning("network_read_error", path=str(path), error=str(e))
+                    health.failed(path, e)
+                else:
+                    health.ok(path)
+
+            health.apply(self)
 
             await asyncio.sleep(1)

@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -34,6 +35,31 @@ GROUP_BY_BUCKET_SIZE = 50
 AI_SUPPRESSION_BUCKET_BUDGET = 3
 
 
+class AiSuppressionBudget:
+    """One allowance of AI suppression-matcher calls, and how to spend it.
+
+    The mechanism, in one place, for every caller that raises alerts:
+    DetectionEngine takes a fresh one per rule evaluation, new_client.py
+    per pass. Both hand `spend` to check_suppressions as spend_ai_budget.
+    """
+
+    def __init__(self, budget: int = AI_SUPPRESSION_BUCKET_BUDGET):
+        self.budget = budget
+        self.remaining = budget
+
+    def spend(self, rule_id: str) -> bool:
+        """Take one unit, or report that there is none left."""
+        if self.remaining <= 0:
+            logger.warning(
+                "suppression_ai_budget_exhausted",
+                rule_id=rule_id,
+                budget=self.budget,
+            )
+            return False
+        self.remaining -= 1
+        return True
+
+
 def _resolve_field(name: str) -> str:
     """Map a rule's field name to its Elasticsearch path."""
     if "." in name or name in TOP_LEVEL_FIELDS:
@@ -41,7 +67,7 @@ def _resolve_field(name: str) -> str:
     return f"parsed.{name}"
 
 
-def _condition_to_es_clause(cond: RuleCondition) -> dict[str, Any] | None:
+def _condition_to_es_clause(cond: RuleCondition) -> dict[str, Any]:
     """Translate a RuleCondition to an Elasticsearch query clause."""
     field = _resolve_field(cond.field)
 
@@ -49,7 +75,16 @@ def _condition_to_es_clause(cond: RuleCondition) -> dict[str, Any] | None:
         case "eq":
             return {"term": {field: cond.value}}
         case "contains":
+            # Deliberately an OR over the value's terms: ES `match` defaults
+            # to operator "or". Existing rules rely on it with single-token
+            # values ("REJECT", "conntrack"), where it reads as substring
+            # matching. For a multi-word value use "phrase" -- `contains`
+            # with one would fire on any document containing any one word.
             return {"match": {field: cond.value}}
+        case "phrase":
+            # The whole value, in order, as written. This is what a
+            # multi-word "contains" looks like to someone reading the rule.
+            return {"match_phrase": {field: cond.value}}
         case "gt":
             return {"range": {field: {"gt": cond.value}}}
         case "lt":
@@ -63,8 +98,15 @@ def _condition_to_es_clause(cond: RuleCondition) -> dict[str, Any] | None:
         case "exists":
             return {"exists": {"field": field}}
         case _:
+            # Unreachable for a rule that came through RuleCondition, which
+            # rejects anything outside RuleOperator. Defence in depth for
+            # the paths that do not (model_construct, a future operator
+            # added to the Literal and forgotten here): match nothing.
+            # Returning None dropped the clause, and a dropped clause makes
+            # a rule *broader*. A broken rule must never be more permissive
+            # than a working one.
             logger.warning("unknown_condition_operator", operator=cond.operator)
-            return None
+            return {"match_none": {}}
 
 
 def build_rule_query(rule: DetectionRule) -> dict[str, Any]:
@@ -79,9 +121,10 @@ def build_rule_query(rule: DetectionRule) -> dict[str, Any]:
 
     # Rule conditions
     for cond in rule.conditions:
-        clause = _condition_to_es_clause(cond)
-        if clause:
-            must.append(clause)
+        # No `if clause:` guard. Dropping a clause silently widens the
+        # rule; every operator now yields a clause, including the
+        # fail-closed one for an operator we do not recognise.
+        must.append(_condition_to_es_clause(cond))
 
     # Time window
     time_from = (datetime.now(UTC) - timedelta(seconds=rule.window_seconds)).isoformat()
@@ -140,7 +183,7 @@ class DetectionEngine:
         self._last_reload: datetime = datetime.min.replace(tzinfo=UTC)
         self._last_expiry_check: datetime = datetime.min.replace(tzinfo=UTC)
         # Reset per rule evaluation; see AI_SUPPRESSION_BUCKET_BUDGET.
-        self._ai_suppression_budget = AI_SUPPRESSION_BUCKET_BUDGET
+        self._ai_suppression_budget = AiSuppressionBudget()
 
     @property
     def rules(self) -> dict[str, DetectionRule]:
@@ -198,7 +241,7 @@ class DetectionEngine:
     async def _evaluate_rule(self, es: AsyncElasticsearch, rule: DetectionRule) -> None:
         """Evaluate a single rule against Elasticsearch."""
         # One budget per rule per pass, spent by _check_suppressions below.
-        self._ai_suppression_budget = AI_SUPPRESSION_BUCKET_BUDGET
+        self._ai_suppression_budget = AiSuppressionBudget()
         query = build_rule_query(rule)
         result = await es.search(index="siem-events-*", body=query)
         hits = result["hits"]["hits"]
@@ -293,7 +336,7 @@ class DetectionEngine:
         event_ids = [hit["_id"] for hit in hits[:50]]
         context = self._build_alert_context(hits)
 
-        suppression_msg = await self._check_suppressions(rule, context)
+        suppression_msg = await self._check_suppressions(rule, context, es)
         if suppression_msg:
             # Create auto-resolved alert
             alert = Alert(
@@ -455,79 +498,22 @@ class DetectionEngine:
             pass  # Index may not exist yet
 
     async def _check_suppressions(
-        self, rule: DetectionRule, context: dict
+        self, rule: DetectionRule, context: dict, es: AsyncElasticsearch | None = None
     ) -> str | None:
-        """Check if a suppression matches this rule+context.
+        """Check whether a suppression matches this rule+context.
 
-        Returns a suppression message if suppressed, None otherwise.
-        Step 1: deterministic field match. Step 2: AI fallback.
+        Thin wrapper over the module-level check_suppressions, carrying this
+        rule evaluation's AI budget. new_client.py raises alerts of its own
+        and calls the same function directly.
         """
-        try:
-            es = await get_es_client()
-            result = await es.search(
-                index="siem-suppressions",
-                body={
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"rule_id": rule.id}},
-                                {"term": {"status": "active"}},
-                            ],
-                            "should": [
-                                {"bool": {"must_not": {"exists": {"field": "expires_at"}}}},
-                                {"range": {"expires_at": {"gt": datetime.now(UTC).isoformat()}}},
-                            ],
-                            "minimum_should_match": 1,
-                        }
-                    },
-                    "size": 20,
-                },
-            )
-        except Exception:
-            return None  # Index may not exist yet
-
-        hits = result["hits"]["hits"]
-        if not hits:
-            return None
-
-        suppressions = [Suppression.from_es_hit(h) for h in hits]
-
-        # Step 1: Deterministic match
-        for s in suppressions:
-            if s.matches_context(context):
-                logger.info("suppression_deterministic_match", suppression_id=s.id, rule_id=rule.id)
-                return f"Auto-suppressed: {s.reason} (suppression {s.id})"
-
-        # Step 2: AI fallback, but only while this rule evaluation has budget
-        # left. A grouped rule raises one alert per breaching bucket and each
-        # one lands here; unbounded, that serialises 10s-a-piece AI calls
-        # inside a 30s detection loop.
-        if self._ai_suppression_budget <= 0:
-            logger.warning(
-                "suppression_ai_budget_exhausted",
-                rule_id=rule.id,
-                budget=AI_SUPPRESSION_BUCKET_BUDGET,
-            )
-            return None
-        self._ai_suppression_budget -= 1
-
-        try:
-            from siem.ai.suppression_matcher import ai_match_suppression
-
-            for s in suppressions:
-                matched = await ai_match_suppression(
-                    suppression=s,
-                    alert_context=context,
-                    alert_rule_name=rule.name,
-                    alert_description=rule.description,
-                )
-                if matched:
-                    logger.info("suppression_ai_match", suppression_id=s.id, rule_id=rule.id)
-                    return f"AI-matched suppression: {s.reason} (suppression {s.id})"
-        except Exception:
-            logger.debug("suppression_ai_fallback_error", rule_id=rule.id)
-
-        return None
+        return await check_suppressions(
+            rule.id,
+            rule.name,
+            rule.description,
+            context,
+            spend_ai_budget=self._ai_suppression_budget.spend,
+            es=es,
+        )
 
     def _cleanup_cooldowns(self) -> None:
         """Remove expired cooldown entries."""
@@ -535,3 +521,83 @@ class DetectionEngine:
         expired = [k for k, v in self._cooldowns.items() if v < cutoff]
         for k in expired:
             del self._cooldowns[k]
+
+
+async def check_suppressions(
+    rule_id: str,
+    rule_name: str,
+    rule_description: str,
+    context: dict,
+    spend_ai_budget: Callable[[str], bool] | None = None,
+    es: AsyncElasticsearch | None = None,
+) -> str | None:
+    """Check whether an active suppression matches this rule+context.
+
+    Returns a suppression message if suppressed, None otherwise.
+    Step 1: deterministic field match. Step 2: AI fallback.
+
+    Module-level rather than a DetectionEngine method because the engine is
+    not the only thing that raises alerts -- new_client.py writes its own --
+    and an alert-writing path that skips this makes the Suppressions tab
+    report success for a rule it will never act on.
+    """
+    try:
+        if es is None:
+            es = await get_es_client()
+        result = await es.search(
+            index="siem-suppressions",
+            body={
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"rule_id": rule_id}},
+                            {"term": {"status": "active"}},
+                        ],
+                        "should": [
+                            {"bool": {"must_not": {"exists": {"field": "expires_at"}}}},
+                            {"range": {"expires_at": {"gt": datetime.now(UTC).isoformat()}}},
+                        ],
+                        "minimum_should_match": 1,
+                    }
+                },
+                "size": 20,
+            },
+        )
+    except Exception:
+        return None  # Index may not exist yet
+
+    hits = result["hits"]["hits"]
+    if not hits:
+        return None
+
+    suppressions = [Suppression.from_es_hit(h) for h in hits]
+
+    # Step 1: Deterministic match
+    for s in suppressions:
+        if s.matches_context(context):
+            logger.info("suppression_deterministic_match", suppression_id=s.id, rule_id=rule_id)
+            return f"Auto-suppressed: {s.reason} (suppression {s.id})"
+
+    # Step 2: AI fallback, but only while the caller still has budget for
+    # it. Every alert-raising caller passes an AiSuppressionBudget.spend:
+    # the engine one per rule evaluation, new_client.py one per pass.
+    if spend_ai_budget is not None and not spend_ai_budget(rule_id):
+        return None
+
+    try:
+        from siem.ai.suppression_matcher import ai_match_suppression
+
+        for s in suppressions:
+            matched = await ai_match_suppression(
+                suppression=s,
+                alert_context=context,
+                alert_rule_name=rule_name,
+                alert_description=rule_description,
+            )
+            if matched:
+                logger.info("suppression_ai_match", suppression_id=s.id, rule_id=rule_id)
+                return f"AI-matched suppression: {s.reason} (suppression {s.id})"
+    except Exception:
+        logger.debug("suppression_ai_fallback_error", rule_id=rule_id)
+
+    return None

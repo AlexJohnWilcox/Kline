@@ -15,6 +15,7 @@ from siem.collectors.network import NetworkCollector
 from siem.collectors.pihole import PiholeCollector
 from siem.collectors.syslog import SyslogCollector
 from siem.detection.engine import DetectionEngine
+from siem.detection.new_client import new_client_loop
 from siem.ai.client import close_ollama_client, get_ollama_client
 from siem.storage.es_client import close_es_client, get_es_client
 from siem.storage.indices import setup_indices
@@ -28,6 +29,7 @@ collector_runner = CollectorRunner()
 detection_engine = DetectionEngine()
 _retention_task: asyncio.Task | None = None
 _device_task: asyncio.Task | None = None
+_new_client_task: asyncio.Task | None = None
 
 # Templates
 templates = Jinja2Templates(directory=str(settings.templates_dir))
@@ -46,7 +48,16 @@ async def lifespan(app: FastAPI):
     await seed_admin_if_missing(settings.admin_username, settings.admin_password)
 
     # Register and start collectors
-    collector_runner.register(SyslogCollector())
+    syslog_paths = settings.syslog_path_list()
+    syslog_drop_patterns = settings.syslog_drop_pattern_list()
+    collector_runner.register(
+        SyslogCollector(
+            paths=syslog_paths or None,
+            # Not `or None`: [] means "drop nothing", which is a real
+            # choice, and only None means "use the collector's defaults".
+            drop_patterns=syslog_drop_patterns,
+        )
+    )
     collector_runner.register(DockerCollector())
     collector_runner.register(NetworkCollector())
     if settings.pihole_enabled:
@@ -72,6 +83,10 @@ async def lifespan(app: FastAPI):
     global _device_task
     _device_task = asyncio.create_task(device_refresh_loop())
 
+    # Start new-client detection loop
+    global _new_client_task
+    _new_client_task = asyncio.create_task(new_client_loop())
+
     # Check Ollama connectivity
     ollama = get_ollama_client()
     if await ollama.is_available():
@@ -94,6 +109,12 @@ async def lifespan(app: FastAPI):
         _device_task.cancel()
         try:
             await _device_task
+        except asyncio.CancelledError:
+            pass
+    if _new_client_task:
+        _new_client_task.cancel()
+        try:
+            await _new_client_task
         except asyncio.CancelledError:
             pass
     if device_resolver is not None:
@@ -221,6 +242,18 @@ async def page_settings(request: Request):
 
 @app.get("/api/v1/collectors/status")
 async def collectors_status() -> dict:
+    """Full collector status, blind_reason included.
+
+    The only handler for this path. A second one briefly lived in
+    siem/api/health.py returning a bare list; because the router is
+    included above, that one shadowed this and silently changed the
+    published {"collectors": [...]} shape for anything consuming it.
+
+    Authenticated, unlike /api/v1/health: the middleware above gates every
+    path not in _AUTH_PUBLIC_PATHS, and this one deliberately is not.
+    blind_reason names configured filesystem paths -- the detail an
+    operator needs and an anonymous caller has no business reading.
+    """
     return {"collectors": collector_runner.status()}
 
 

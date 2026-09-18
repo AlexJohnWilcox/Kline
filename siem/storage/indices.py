@@ -36,6 +36,32 @@ EVENT_INDEX_TEMPLATE = {
                         "query_type": {"type": "keyword"},
                         "upstream": {"type": "keyword"},
                         "ftl_rowid": {"type": "long"},
+                        "process": {"type": "keyword"},
+                        "action": {"type": "keyword"},
+                        "user": {"type": "keyword"},
+                        # keyword, not ip. The parsers feed these from bare
+                        # regex captures with no validation, and demonstrably
+                        # emit values that are not addresses: _split_source
+                        # deliberately declines to split IPv6, so dropbear's
+                        # peer arrives as "2001:db8::1:53800", and sshd with
+                        # UseDNS writes "gate.lan" or "UNKNOWN". Elasticsearch
+                        # rejects the WHOLE DOCUMENT on a malformed `ip`;
+                        # ignore_malformed would instead drop just the field,
+                        # silently. keyword loses neither. Nothing performs
+                        # the CIDR queries `ip` was chosen for.
+                        "src_ip": {"type": "keyword"},
+                        # Mapped alongside src_ip. network.py writes them
+                        # together from the same regex; leaving this one
+                        # dynamic gave two adjacent fields of the same kind
+                        # different types.
+                        "dst_ip": {"type": "keyword"},
+                        "src_port": {"type": "integer"},
+                        "dst_port": {"type": "integer"},
+                        "auth_method": {"type": "keyword"},
+                        "facility": {"type": "keyword"},
+                        "in_iface": {"type": "keyword"},
+                        "out_iface": {"type": "keyword"},
+                        "pid": {"type": "long"},
                     },
                 },
             }
@@ -170,6 +196,20 @@ DEVICE_INDEX_TEMPLATE = {
 }
 
 
+SEEN_INDEX_TEMPLATE = {
+    "index_patterns": ["siem-seen"],
+    "template": {
+        "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+        "mappings": {
+            "properties": {
+                "values": {"type": "keyword"},
+                "updated_at": {"type": "date"},
+            }
+        },
+    },
+}
+
+
 def get_event_index(when: datetime | None = None) -> str:
     """Event indices are daily, so a 30-day retention window can be expressed."""
     when = when or datetime.now(UTC)
@@ -219,3 +259,9 @@ async def setup_indices(es: AsyncElasticsearch) -> None:
         body=DEVICE_INDEX_TEMPLATE,
     )
     logger.info("index_template_created", name="siem-devices")
+
+    await es.indices.put_index_template(
+        name="siem-seen",
+        body=SEEN_INDEX_TEMPLATE,
+    )
+    logger.info("index_template_created", name="siem-seen")

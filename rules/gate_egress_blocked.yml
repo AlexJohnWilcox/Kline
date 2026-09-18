@@ -1,0 +1,16 @@
+id: gate-egress-blocked
+name: The Kill Switch Rejected Traffic
+description: >
+  The Gate's firewall refused to forward a packet. The kill switch is
+  structural - the default forward policy is REJECT and the only rule is
+  lan to wg - so this is a device trying to reach the internet by a path
+  that does not exist, usually while the tunnel is down.
+severity: medium
+source: syslog
+conditions:
+  - field: message
+    operator: contains
+    value: "REJECT"
+threshold: 5
+window_seconds: 300
+tags: [gate, firewall, egress]

@@ -48,6 +48,18 @@ class Settings(BaseSettings):
     # "entire database" (~1.28 million rows). ge=1 forbids the trap.
     pihole_backfill_days: int = Field(default=30, ge=1)
 
+    # Extra syslog files to tail, comma separated. Empty means the collector's
+    # own defaults. The Gate's remote stream lands somewhere no default list
+    # knows about, so it has to be named here.
+    syslog_paths: str = ""
+
+    # Regexes whose matching syslog lines are never indexed. Unset uses the
+    # collector's own default (see DEFAULT_DROP_PATTERNS); an explicitly
+    # empty SYSLOG_DROP_PATTERNS="" drops nothing at all. None is the
+    # default rather than "" precisely so those two are distinguishable --
+    # `"" or None` collapsed them and left no way to turn dropping off.
+    syslog_drop_patterns: str | None = None
+
     # Device names - resolved from the sanctum's own roster at render time,
     # never written onto events. Off by default: without it every host shows
     # as its raw address, which is the behaviour this replaces.
@@ -74,10 +86,32 @@ class Settings(BaseSettings):
     admin_username: str = "alexwilcox"
     admin_password: str = "REDACTED"
 
+    # New-device detection. Off by default: it writes alerts, and it must be
+    # seeded before it is useful.
+    new_client_enabled: bool = False
+    new_client_interval_seconds: int = Field(default=300, ge=60)
+    new_client_seed_days: int = Field(default=30, ge=1)
+
     # Paths
     rules_dir: Path = Path("rules")
     templates_dir: Path = Path("frontend/templates")
     static_dir: Path = Path("frontend/static")
+
+    def syslog_path_list(self) -> list[Path]:
+        """Parse syslog_paths, tolerating spaces and trailing separators."""
+        return [Path(p.strip()) for p in self.syslog_paths.split(",") if p.strip()]
+
+    def syslog_drop_pattern_list(self) -> list[str] | None:
+        """Parse syslog_drop_patterns, tolerating spaces and trailing separators.
+
+        None when the setting is unset, which the collector reads as "use
+        your own defaults". An explicit empty value yields [], which means
+        "drop nothing" -- a distinction the collector already supports and
+        configuration previously could not express.
+        """
+        if self.syslog_drop_patterns is None:
+            return None
+        return [p.strip() for p in self.syslog_drop_patterns.split(",") if p.strip()]
 
 
 settings = Settings()

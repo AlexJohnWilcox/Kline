@@ -5,6 +5,7 @@ import pytest
 
 from siem.detection.engine import (
     AI_SUPPRESSION_BUCKET_BUDGET,
+    AiSuppressionBudget,
     DetectionEngine,
     build_rule_query,
     grouped_breaches,
@@ -451,7 +452,7 @@ class _SuppressionES:
 
 def _budget_engine(monkeypatch, calls):
     engine = DetectionEngine()
-    engine._ai_suppression_budget = AI_SUPPRESSION_BUCKET_BUDGET
+    engine._ai_suppression_budget = AiSuppressionBudget()
 
     async def fake_es_client():
         return _SuppressionES()
@@ -498,9 +499,9 @@ async def test_each_rule_evaluation_starts_with_a_fresh_ai_budget(monkeypatch):
         return_value={"hits": {"total": {"value": 0}, "hits": []}}
     )
 
-    engine._ai_suppression_budget = 0
+    engine._ai_suppression_budget.remaining = 0
     await engine._evaluate_rule(mock_es, rule)
-    assert engine._ai_suppression_budget == AI_SUPPRESSION_BUCKET_BUDGET
+    assert engine._ai_suppression_budget.remaining == AI_SUPPRESSION_BUCKET_BUDGET
 
 
 async def test_a_deterministic_match_never_spends_ai_budget(monkeypatch):
@@ -513,4 +514,4 @@ async def test_a_deterministic_match_never_spends_ai_budget(monkeypatch):
 
     assert msg is not None and "Auto-suppressed" in msg
     assert calls == []
-    assert engine._ai_suppression_budget == AI_SUPPRESSION_BUCKET_BUDGET
+    assert engine._ai_suppression_budget.remaining == AI_SUPPRESSION_BUCKET_BUDGET
