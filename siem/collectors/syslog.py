@@ -332,7 +332,14 @@ class SyslogCollector(BaseCollector):
             try:
                 positions[path] = path.stat().st_size
             except OSError:
+                # Priming only. A path that cannot be stat'd starts at 0; if
+                # the cause is permissions, the main loop marks blind on its
+                # first pass rather than this one guessing.
                 positions[path] = 0
+
+        # Paths that exist but cannot be opened. Tracked across passes so a
+        # pass in which every path reads cleanly can lift the blind flag.
+        unreadable: dict[Path, str] = {}
 
         while True:
             for path in self.paths:
@@ -344,7 +351,13 @@ class SyslogCollector(BaseCollector):
                     if current_size < last_pos:
                         last_pos = 0
 
-                    if current_size > last_pos:
+                    # >= rather than > : a file that never grows again after
+                    # priming (e.g. permission revoked with no further writes)
+                    # would otherwise never be opened, and a PermissionError
+                    # that only stat() (not open()) would swallow would go
+                    # undetected forever. The extra open+seek-to-EOF on an
+                    # unchanged, readable file is a no-op cost.
+                    if current_size >= last_pos:
                         with open(path) as f:
                             f.seek(last_pos)
                             for line in f:
@@ -358,7 +371,24 @@ class SyslogCollector(BaseCollector):
                                     yield event
                             positions[path] = f.tell()
 
-                except OSError as e:
+                except PermissionError as e:
+                    # Not transient: a permission error is a fact about the
+                    # deployment, not a moment in time. This is the case where
+                    # the collector would otherwise report healthy forever
+                    # while indexing nothing.
+                    unreadable[path] = f"permission denied reading {path}: {e}"
                     logger.warning("syslog_read_error", path=str(path), error=str(e))
+                except OSError as e:
+                    # Rotation makes a file briefly absent; that is not
+                    # blindness, and flapping the flag would make it noise.
+                    unreadable.pop(path, None)
+                    logger.warning("syslog_read_error", path=str(path), error=str(e))
+                else:
+                    unreadable.pop(path, None)
+
+            if unreadable:
+                self.mark_blind("; ".join(sorted(unreadable.values())))
+            else:
+                self.clear_blind()
 
             await asyncio.sleep(1)  # poll interval

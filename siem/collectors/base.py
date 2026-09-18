@@ -50,6 +50,18 @@ class BaseCollector(abc.ABC):
         self._blind_reason = reason
         logger.warning("collector_blind", name=self.name, reason=reason)
 
+    def clear_blind(self) -> None:
+        """Record that this collector can read its source again.
+
+        mark_blind is otherwise one-way, which would leave a collector
+        reporting blind for the rest of the process after a single
+        transient failure — and, worse, would make the honest signal
+        useless the first time someone fixed the cause without a restart.
+        """
+        if self._blind_reason is not None:
+            logger.info("collector_sighted", name=self.name)
+        self._blind_reason = None
+
     @abc.abstractmethod
     async def collect(self) -> AsyncIterator[Event]:
         """Yield normalized events from the log source. Runs continuously."""
