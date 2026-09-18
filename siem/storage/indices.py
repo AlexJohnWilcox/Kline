@@ -156,7 +156,16 @@ DEVICE_INDEX_TEMPLATE = {
         # The map is one small object of arbitrary keys. Indexing every
         # address as a field would be pointless and would grow the mapping
         # every time a device appears, so it is stored and not indexed.
-        "mappings": {"properties": {"names": {"type": "object", "enabled": False}}},
+        # fetched_at is a sibling of names, not a field inside it: "enabled":
+        # False switches off indexing for everything under names, so a date
+        # kept in there could never be searched or aggregated. Here it is an
+        # ordinary indexed date, and _source returns it either way.
+        "mappings": {
+            "properties": {
+                "names": {"type": "object", "enabled": False},
+                "fetched_at": {"type": "date"},
+            }
+        },
     },
 }
 

@@ -61,8 +61,12 @@ async def list_devices(hours: int = Query(24, ge=1, le=720)) -> dict:
     names = resolver.names if resolver is not None else {}
     return {
         "devices": attach_names(rows, names),
-        "names": names,
         "resolved": bool(names),
+        # When those names were last fetched, so the panel can say how old
+        # they are. Cached names survive a restart and an indefinite outage,
+        # so "resolved" alone would present months-old naming as current.
+        # None means unknown: never fetched, or cached before this was dated.
+        "names_as_of": resolver.fetched_at if resolver is not None else None,
     }
 
 

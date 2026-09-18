@@ -57,6 +57,8 @@ def test_malformed_top_level_payloads_yield_empty_map():
     assert parse_roster(42) == {}
 
 
+from datetime import UTC, datetime
+
 import httpx
 import pytest
 
@@ -64,8 +66,9 @@ from siem.enrich.devices import DeviceResolver
 
 
 class FakeES:
-    def __init__(self, stored=None):
+    def __init__(self, stored=None, fetched_at=None):
         self.stored = stored
+        self.fetched_at = fetched_at
         self.indexed = []
 
     async def get(self, index, id):
@@ -73,11 +76,15 @@ class FakeES:
             from elasticsearch import NotFoundError
 
             raise NotFoundError("not found", {}, {})
-        return {"_source": {"names": self.stored}}
+        source = {"names": self.stored}
+        if self.fetched_at is not None:
+            source["fetched_at"] = self.fetched_at
+        return {"_source": source}
 
     async def index(self, index, id, document, refresh=False):
         self.indexed.append((index, id, document))
         self.stored = document["names"]
+        self.fetched_at = document.get("fetched_at")
 
 
 def _resolver(handler):
@@ -168,3 +175,78 @@ async def test_a_malformed_roster_url_does_not_erase_a_prior_good_map():
     r.url = "http://[::1"
     names = await r.refresh(es)
     assert names["192.168.10.241"] == "scrying-glass"
+
+
+# ── The names have to carry their age ──
+#
+# Cached names survive a restart and an unbounded outage. Undated, the panel
+# presents a map fetched months ago exactly as it presents one fetched a
+# minute ago - the same silent drift the spec rejected a static config map
+# for.
+
+
+@pytest.mark.asyncio
+async def test_a_good_fetch_dates_the_cache_document():
+    es = FakeES()
+    r = _resolver(lambda req: httpx.Response(200, json=SAMPLE))
+    await r.refresh(es)
+    _, _, doc = es.indexed[0]
+    assert "fetched_at" in doc, "undated names cannot be aged by the UI"
+    stamped = datetime.fromisoformat(doc["fetched_at"])
+    assert abs((datetime.now(UTC) - stamped).total_seconds()) < 60
+    assert r.fetched_at == doc["fetched_at"]
+
+
+@pytest.mark.asyncio
+async def test_the_cached_names_come_back_with_their_date():
+    es = FakeES(
+        stored={"192.168.10.241": "scrying-glass"},
+        fetched_at="2026-07-01T12:00:00+00:00",
+    )
+    r = DeviceResolver(url="https://dash.lan/data.json")
+    await r.load(es)
+    assert r.fetched_at == "2026-07-01T12:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_a_cache_written_before_dates_existed_loads_as_unknown_age():
+    es = FakeES(stored={"192.168.10.241": "scrying-glass"})
+    r = DeviceResolver(url="https://dash.lan/data.json")
+    assert await r.load(es) == {"192.168.10.241": "scrying-glass"}
+    assert r.fetched_at is None, "unknown age must not read as fresh"
+
+
+@pytest.mark.asyncio
+async def test_never_having_fetched_is_an_unknown_date_not_now():
+    assert DeviceResolver(url="https://dash.lan/data.json").fetched_at is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fetch_does_not_freshen_the_date():
+    """Retained names keep the date of the fetch that produced them."""
+    es = FakeES()
+    r = _resolver(lambda req: httpx.Response(200, json=SAMPLE))
+    await r.refresh(es)
+    first = r.fetched_at
+
+    r._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda req: (_ for _ in ()).throw(httpx.ConnectError("down"))
+        )
+    )
+    await r.refresh(es)
+    assert r.fetched_at == first
+
+
+@pytest.mark.asyncio
+async def test_an_empty_roster_does_not_freshen_the_date_either():
+    es = FakeES()
+    r = _resolver(lambda req: httpx.Response(200, json=SAMPLE))
+    await r.refresh(es)
+    first = r.fetched_at
+
+    r._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={}))
+    )
+    await r.refresh(es)
+    assert r.fetched_at == first

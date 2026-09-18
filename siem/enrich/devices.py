@@ -7,6 +7,7 @@ reads that and nothing more.
 """
 
 import ssl
+from datetime import UTC, datetime
 
 import httpx
 import structlog
@@ -58,6 +59,12 @@ class DeviceResolver:
     def __init__(self, url: str, ca_path: str | None = None, timeout: float = 5.0):
         self.url = url
         self.names: dict[str, str] = {}
+        # When self.names was last fetched from the roster, ISO-8601 UTC, or
+        # None for "never fetched in this process and nothing dated in the
+        # cache". Names outlive their fetch - load() restores them across a
+        # restart and refresh() keeps them through an outage - so without a
+        # date the UI cannot tell current names from months-old ones.
+        self.fetched_at: str | None = None
         # Caddy serves dash.lan with its internal CA, and httpx verifies
         # against certifi's bundle rather than the system trust store, so the
         # root has to be handed over explicitly. The dashboard publishes it.
@@ -84,7 +91,11 @@ class DeviceResolver:
         except Exception:
             logger.exception("device_roster_cache_read_failed")
             return {}
-        self.names = dict(doc["_source"].get("names") or {})
+        source = doc["_source"]
+        self.names = dict(source.get("names") or {})
+        # Absent in documents written before the field existed: the names are
+        # still usable, their age is simply unknown, and None says so.
+        self.fetched_at = source.get("fetched_at") or None
         return self.names
 
     async def refresh(self, es) -> dict[str, str]:
@@ -117,11 +128,14 @@ class DeviceResolver:
             return self.names
 
         self.names = names
+        # Dated at the fetch, not at the cache write: a failed write must not
+        # leave the in-memory map claiming to be older than it is.
+        self.fetched_at = datetime.now(UTC).isoformat()
         try:
             await es.index(
                 index=DEVICE_INDEX,
                 id=ROSTER_DOC_ID,
-                document={"names": names},
+                document={"names": names, "fetched_at": self.fetched_at},
                 refresh=False,
             )
         except Exception:

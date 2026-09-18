@@ -85,7 +85,8 @@
       <aside class="device-panel" x-show="devices.length">
         <div class="device-panel-head">
             <span>Devices</span>
-            <span class="device-panel-sub" x-text="resolvedLabel()"></span>
+            <span class="device-panel-sub" x-text="resolvedLabel()"
+                  :title="namesAsOf ? 'Device names fetched ' + new Date(namesAsOf).toLocaleString() : ''"></span>
         </div>
         <template x-for="d in devices" :key="d.host">
             <button class="device-row"
@@ -217,6 +218,7 @@ function eventsPage() {
         filters: { source: '', severity: '', category: '', host: '', q: '' },
         devices: [],
         namesResolved: false,
+        namesAsOf: null,
         expandedEvent: null,
         summary: null,
         summarizing: false,
@@ -249,6 +251,7 @@ function eventsPage() {
                 const data = await resp.json();
                 this.devices = data.devices || [];
                 this.namesResolved = !!data.resolved;
+                this.namesAsOf = data.names_as_of || null;
             } catch (e) {
                 // The panel is an aid, not the page. A failure here must not
                 // stop the events table rendering.
@@ -262,7 +265,19 @@ function eventsPage() {
         },
 
         resolvedLabel() {
-            return this.namesResolved ? 'last 24h' : 'last 24h · names unavailable';
+            // Names are cached: they survive a restart and an outage of any
+            // length, so "resolved" on its own would show a months-old map
+            // exactly like a fresh one. Say the age once it stops being
+            // plausibly current - three times the 300s default refresh.
+            if (!this.namesResolved) return 'last 24h · names unavailable';
+            if (!this.namesAsOf) return 'last 24h · names of unknown age';
+            const mins = Math.round((Date.now() - new Date(this.namesAsOf)) / 60000);
+            if (!isFinite(mins) || mins < 15) return 'last 24h';
+            if (mins < 60) return `last 24h · names ${mins}m old`;
+            const hrs = Math.round(mins / 60);
+            return hrs < 24
+                ? `last 24h · names ${hrs}h old`
+                : `last 24h · names ${Math.round(hrs / 24)}d old`;
         },
 
         lastSeen(d) {

@@ -85,8 +85,65 @@ async def test_list_devices_still_returns_rows_when_the_resolver_could_not_be_bu
     result = await list_devices(hours=24)
     assert result["devices"][0]["host"] == "192.168.10.241"
     assert result["devices"][0]["name"] is None
-    assert result["names"] == {}
     assert result["resolved"] is False
+    assert result["names_as_of"] is None
+
+
+# ── The response says how old the naming is, and no more ──
+
+
+class StubResolver:
+    def __init__(self, names, fetched_at):
+        self.names = names
+        self.fetched_at = fetched_at
+
+
+@pytest.mark.asyncio
+async def test_the_response_dates_the_names_it_resolved(monkeypatch):
+    import siem.api.devices as devices_module
+
+    monkeypatch.setattr(
+        devices_module,
+        "resolver",
+        StubResolver({"192.168.10.241": "scrying-glass"}, "2026-07-01T12:00:00+00:00"),
+    )
+
+    async def fake_get_es_client():
+        return FakeES()
+
+    monkeypatch.setattr(devices_module, "get_es_client", fake_get_es_client)
+
+    result = await list_devices(hours=24)
+    assert result["resolved"] is True
+    assert result["names_as_of"] == "2026-07-01T12:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_the_response_does_not_ship_the_whole_roster(monkeypatch):
+    """Only the devices that reported events are the panel's business.
+
+    The full map is payload nothing reads, and it discloses the names of
+    devices that produced no events in the window.
+    """
+    import siem.api.devices as devices_module
+
+    monkeypatch.setattr(
+        devices_module,
+        "resolver",
+        StubResolver(
+            {"192.168.10.241": "scrying-glass", "192.168.10.7": "quiet-one"},
+            "2026-07-01T12:00:00+00:00",
+        ),
+    )
+
+    async def fake_get_es_client():
+        return FakeES()
+
+    monkeypatch.setattr(devices_module, "get_es_client", fake_get_es_client)
+
+    result = await list_devices(hours=24)
+    assert "names" not in result
+    assert "quiet-one" not in str(result)
 
 
 # ── httpx 0.28 deprecates verify=<str> ──
