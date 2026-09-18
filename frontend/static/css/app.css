@@ -1363,6 +1363,7 @@ select:focus, input:focus {
 /* Events page device panel. Deliberately not .sidebar - that is the app's
    main navigation rail in base.html and the names would collide. */
 .events-layout { display: grid; grid-template-columns: 260px 1fr; gap: 16px; align-items: start; }
+.events-layout.no-panel { grid-template-columns: 1fr; }
 .device-panel { background: var(--bg-card, #16181d); border: 1px solid var(--border, #262a33);
   border-radius: 6px; padding: 8px; max-height: 70vh; overflow-y: auto; }
 .device-panel-head { display: flex; justify-content: space-between; align-items: baseline;

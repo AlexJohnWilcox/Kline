@@ -81,7 +81,7 @@
         </div>
     </template>
 
-    <div class="events-layout">
+    <div class="events-layout" :class="{ 'no-panel': !devices.length }">
       <aside class="device-panel" x-show="devices.length">
         <div class="device-panel-head">
             <span>Devices</span>
