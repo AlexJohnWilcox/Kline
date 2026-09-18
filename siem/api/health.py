@@ -35,4 +35,12 @@ async def health_check() -> dict:
         status["ollama"] = "unavailable"
         status["status"] = "degraded"
 
+    # Check collectors
+    from siem.main import collector_runner
+
+    collectors = collector_runner.status()
+    status["collectors"] = collectors
+    if any(c["health"] == "blind" for c in collectors):
+        status["status"] = "degraded"
+
     return status

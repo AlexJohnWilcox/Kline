@@ -249,6 +249,12 @@ class NetworkCollector(BaseCollector):
         super().__init__(name="network")
         self.firewall_paths = firewall_paths or [p for p in FIREWALL_LOG_PATHS if p.exists()]
         self.dns_paths = dns_paths or [p for p in DNS_LOG_PATHS if p.exists()]
+        if not any(p.exists() for p in self.all_paths):
+            searched = (firewall_paths or FIREWALL_LOG_PATHS) + (dns_paths or DNS_LOG_PATHS)
+            self.mark_blind(
+                "no readable paths among: "
+                + ", ".join(str(p) for p in searched)
+            )
 
     @property
     def all_paths(self) -> list[Path]:

@@ -147,6 +147,12 @@ class SyslogCollector(BaseCollector):
     def __init__(self, paths: list[Path] | None = None):
         super().__init__(name="syslog")
         self.paths = paths or [p for p in self.DEFAULT_PATHS if p.exists()]
+        if not any(p.exists() for p in self.paths):
+            searched = paths or self.DEFAULT_PATHS
+            self.mark_blind(
+                "no readable paths among: "
+                + ", ".join(str(p) for p in searched)
+            )
 
     async def collect(self) -> AsyncIterator[Event]:
         """Tail syslog files and yield events."""

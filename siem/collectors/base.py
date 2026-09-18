@@ -17,6 +17,7 @@ class BaseCollector(abc.ABC):
         self._running = False
         self._task: asyncio.Task | None = None
         self._event_count = 0
+        self._blind_reason: str | None = None
 
     @property
     def is_running(self) -> bool:
@@ -25,6 +26,29 @@ class BaseCollector(abc.ABC):
     @property
     def event_count(self) -> int:
         return self._event_count
+
+    @property
+    def blind_reason(self) -> str | None:
+        return self._blind_reason
+
+    @property
+    def health(self) -> str:
+        """ok, blind, or stopped.
+
+        "blind" means the collector is configured to read something that is
+        not there. It is distinct from "stopped" because stopped is what a
+        cancelled collector looks like at shutdown, and blind is a
+        misconfiguration nobody will notice otherwise: the collector reports
+        no events, which is exactly what a quiet source reports.
+        """
+        if self._blind_reason:
+            return "blind"
+        return "ok" if self._running else "stopped"
+
+    def mark_blind(self, reason: str) -> None:
+        """Record that this collector has nothing it can read, and why."""
+        self._blind_reason = reason
+        logger.warning("collector_blind", name=self.name, reason=reason)
 
     @abc.abstractmethod
     async def collect(self) -> AsyncIterator[Event]:
@@ -51,4 +75,6 @@ class BaseCollector(abc.ABC):
             "name": self.name,
             "running": self._running,
             "event_count": self._event_count,
+            "health": self.health,
+            "blind_reason": self._blind_reason,
         }
