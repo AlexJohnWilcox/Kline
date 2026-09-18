@@ -37,6 +37,30 @@ CRITICAL_PATTERNS = re.compile(
     r"(?i)(segfault|kernel panic|out of memory|oom-killer|critical)"
 )
 
+# The Oracle's dashboard collector authenticates to the Gate every 30 seconds,
+# six to twelve dropbear lines a pass. Measured: that is the great majority of
+# the Gate's entire 128 KB ring buffer. Keyed on the source ADDRESS rather than
+# on dropbear, so a real login from anywhere else is still recorded.
+DEFAULT_DROP_PATTERNS = [
+    r"dropbear.*192\.168\.10\.2[:\s>]",
+]
+
+
+def should_ingest(line: str, patterns: list[str]) -> bool:
+    """False when a line matches a configured drop pattern.
+
+    A malformed pattern is ignored rather than raised: a typo in config must
+    not stop the collector, and the failure mode of keeping a noisy line is
+    far cheaper than the failure mode of ingesting nothing.
+    """
+    for pat in patterns:
+        try:
+            if re.search(pat, line):
+                return False
+        except re.error:
+            logger.warning("syslog_drop_pattern_invalid", pattern=pat)
+    return True
+
 
 def parse_syslog_line(line: str) -> Event | None:
     """Parse a single syslog line into an Event."""
@@ -144,9 +168,16 @@ class SyslogCollector(BaseCollector):
         Path("/var/log/secure"),
     ]
 
-    def __init__(self, paths: list[Path] | None = None):
+    def __init__(
+        self,
+        paths: list[Path] | None = None,
+        drop_patterns: list[str] | None = None,
+    ):
         super().__init__(name="syslog")
         self.paths = paths or [p for p in self.DEFAULT_PATHS if p.exists()]
+        self.drop_patterns = (
+            DEFAULT_DROP_PATTERNS if drop_patterns is None else drop_patterns
+        )
         if not any(p.exists() for p in self.paths):
             searched = paths or self.DEFAULT_PATHS
             self.mark_blind(
@@ -186,6 +217,8 @@ class SyslogCollector(BaseCollector):
                             for line in f:
                                 line = line.strip()
                                 if not line:
+                                    continue
+                                if not should_ingest(line, self.drop_patterns):
                                     continue
                                 event = parse_syslog_line(line)
                                 if event:

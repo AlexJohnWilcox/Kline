@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # knows about, so it has to be named here.
     syslog_paths: str = ""
 
+    # Regexes whose matching syslog lines are never indexed. Empty uses the
+    # collector's own default. See DEFAULT_DROP_PATTERNS.
+    syslog_drop_patterns: str = ""
+
     # Device names - resolved from the sanctum's own roster at render time,
     # never written onto events. Off by default: without it every host shows
     # as its raw address, which is the behaviour this replaces.
@@ -87,6 +91,10 @@ class Settings(BaseSettings):
     def syslog_path_list(self) -> list[Path]:
         """Parse syslog_paths, tolerating spaces and trailing separators."""
         return [Path(p.strip()) for p in self.syslog_paths.split(",") if p.strip()]
+
+    def syslog_drop_pattern_list(self) -> list[str]:
+        """Parse syslog_drop_patterns, tolerating spaces and trailing separators."""
+        return [p.strip() for p in self.syslog_drop_patterns.split(",") if p.strip()]
 
 
 settings = Settings()

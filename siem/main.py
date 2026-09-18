@@ -47,7 +47,13 @@ async def lifespan(app: FastAPI):
 
     # Register and start collectors
     syslog_paths = settings.syslog_path_list()
-    collector_runner.register(SyslogCollector(paths=syslog_paths or None))
+    syslog_drop_patterns = settings.syslog_drop_pattern_list()
+    collector_runner.register(
+        SyslogCollector(
+            paths=syslog_paths or None,
+            drop_patterns=syslog_drop_patterns or None,
+        )
+    )
     collector_runner.register(DockerCollector())
     collector_runner.register(NetworkCollector())
     if settings.pihole_enabled:
