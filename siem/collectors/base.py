@@ -46,9 +46,16 @@ class BaseCollector(abc.ABC):
         return "ok" if self._running else "stopped"
 
     def mark_blind(self, reason: str) -> None:
-        """Record that this collector has nothing it can read, and why."""
+        """Record that this collector has nothing it can read, and why.
+
+        Only logs on a change. Collect loops call this every pass for as
+        long as the cause persists, and a warning a second for a
+        permanently missing file buries the one that mattered.
+        """
+        changed = self._blind_reason != reason
         self._blind_reason = reason
-        logger.warning("collector_blind", name=self.name, reason=reason)
+        if changed:
+            logger.warning("collector_blind", name=self.name, reason=reason)
 
     def clear_blind(self) -> None:
         """Record that this collector can read its source again.

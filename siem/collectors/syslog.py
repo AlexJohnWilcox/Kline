@@ -8,6 +8,7 @@ from typing import AsyncIterator
 import structlog
 
 from siem.collectors.base import BaseCollector
+from siem.collectors.path_health import MISSING_GRACE_PASSES, PathHealth
 from siem.models.event import Event, EventCategory, EventSeverity
 
 logger = structlog.get_logger()
@@ -325,6 +326,11 @@ class SyslogCollector(BaseCollector):
         Path("/var/log/secure"),
     ]
 
+    # Consecutive passes a configured path may be absent before the
+    # collector calls itself blind. Exposed on the class so tests can drive
+    # the grace period without sleeping through it.
+    MISSING_GRACE_PASSES = MISSING_GRACE_PASSES
+
     def __init__(
         self,
         paths: list[Path] | None = None,
@@ -361,11 +367,16 @@ class SyslogCollector(BaseCollector):
                 # first pass rather than this one guessing.
                 positions[path] = 0
 
-        # Paths that exist but cannot be opened. Tracked across passes so a
-        # pass in which every path reads cleanly can lift the blind flag.
-        unreadable: dict[Path, str] = {}
+        # Read outcomes across passes, and the blind flag they imply. See
+        # siem/collectors/path_health.py for the three rules it enforces.
+        health = PathHealth(
+            self.paths,
+            log_event="syslog_read_error",
+            grace_passes=self.MISSING_GRACE_PASSES,
+        )
 
         while True:
+            health.begin_pass()
             for path in self.paths:
                 try:
                     current_size = path.stat().st_size
@@ -395,24 +406,17 @@ class SyslogCollector(BaseCollector):
                                     yield event
                             positions[path] = f.tell()
 
-                except PermissionError as e:
-                    # Not transient: a permission error is a fact about the
-                    # deployment, not a moment in time. This is the case where
-                    # the collector would otherwise report healthy forever
-                    # while indexing nothing.
-                    unreadable[path] = f"permission denied reading {path}: {e}"
-                    logger.warning("syslog_read_error", path=str(path), error=str(e))
                 except OSError as e:
-                    # Rotation makes a file briefly absent; that is not
-                    # blindness, and flapping the flag would make it noise.
-                    unreadable.pop(path, None)
-                    logger.warning("syslog_read_error", path=str(path), error=str(e))
+                    # Every read failure -- permission, absence, or anything
+                    # else -- is classified in one place. The previous shape
+                    # popped the path on OSError, and FileNotFoundError is an
+                    # OSError, so a configured-but-absent path emptied the
+                    # bookkeeping and cleared the construction-time blind
+                    # flag within a second of startup.
+                    health.failed(path, e)
                 else:
-                    unreadable.pop(path, None)
+                    health.ok(path)
 
-            if unreadable:
-                self.mark_blind("; ".join(sorted(unreadable.values())))
-            else:
-                self.clear_blind()
+            health.apply(self)
 
             await asyncio.sleep(1)  # poll interval
