@@ -53,7 +53,9 @@ async def lifespan(app: FastAPI):
     collector_runner.register(
         SyslogCollector(
             paths=syslog_paths or None,
-            drop_patterns=syslog_drop_patterns or None,
+            # Not `or None`: [] means "drop nothing", which is a real
+            # choice, and only None means "use the collector's defaults".
+            drop_patterns=syslog_drop_patterns,
         )
     )
     collector_runner.register(DockerCollector())

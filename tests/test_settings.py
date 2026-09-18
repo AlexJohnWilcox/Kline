@@ -127,3 +127,35 @@ def test_syslog_paths_tolerates_spaces_and_trailing_commas(monkeypatch):
 def test_an_empty_setting_yields_an_empty_list_not_a_path_to_nothing(monkeypatch):
     monkeypatch.setenv("SYSLOG_PATHS", "")
     assert Settings(_env_file=None).syslog_path_list() == []
+
+
+def test_syslog_drop_patterns_unset_means_use_the_collectors_default(monkeypatch):
+    monkeypatch.delenv("SYSLOG_DROP_PATTERNS", raising=False)
+    assert Settings(_env_file=None).syslog_drop_pattern_list() is None
+
+
+def test_an_explicitly_empty_drop_pattern_list_means_drop_nothing(monkeypatch):
+    """`drop_patterns=... or None` collapsed [] to None, so there was no
+    configuration value that turned dropping off -- the collector's own
+    should_ingest(line, []) path was unreachable from config."""
+    monkeypatch.setenv("SYSLOG_DROP_PATTERNS", "")
+    assert Settings(_env_file=None).syslog_drop_pattern_list() == []
+
+
+def test_syslog_drop_patterns_parses_a_comma_separated_list(monkeypatch):
+    monkeypatch.setenv("SYSLOG_DROP_PATTERNS", r" dropbear.*10\.0\.0\.1 , noise , ")
+    assert Settings(_env_file=None).syslog_drop_pattern_list() == [
+        r"dropbear.*10\.0\.0\.1",
+        "noise",
+    ]
+
+
+def test_the_collector_honours_each_of_the_three_states():
+    """None, [], and a list are three different instructions."""
+    from siem.collectors.syslog import DEFAULT_DROP_PATTERNS, SyslogCollector
+
+    assert SyslogCollector(paths=[], drop_patterns=None).drop_patterns == (
+        DEFAULT_DROP_PATTERNS
+    )
+    assert SyslogCollector(paths=[], drop_patterns=[]).drop_patterns == []
+    assert SyslogCollector(paths=[], drop_patterns=["x"]).drop_patterns == ["x"]
