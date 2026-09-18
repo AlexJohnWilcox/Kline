@@ -53,7 +53,13 @@ class Settings(BaseSettings):
     # as its raw address, which is the behaviour this replaces.
     device_names_enabled: bool = False
     device_roster_url: str = "https://dash.lan/data.json"
-    # Caddy's internal CA. Published by the dashboard at /caddy-root.crt.
+    # Path to the CA that signed the roster URL. Effectively required for a
+    # privately signed roster (dash.lan is signed by Caddy's internal root):
+    # httpx verifies against certifi's bundle, NOT the system trust store, so
+    # a host curl and the browser both accept can still fail here with
+    # CERTIFICATE_VERIFY_FAILED. The dashboard publishes its root at
+    # /caddy-root.crt; see .env.example for the one-line fetch. Unset means
+    # "verify against certifi", which only works for a public certificate.
     device_roster_ca: str | None = None
     device_roster_refresh_seconds: int = Field(default=300, ge=30)
 
