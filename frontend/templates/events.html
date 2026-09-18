@@ -152,12 +152,21 @@
 
         <!-- Pagination -->
         <div class="pagination" x-show="total > 0">
-            <span class="pagination-info">
+            <!-- The range describes a page that loaded. After a failure it
+                 would describe one that did not, so it stands down and lets
+                 the table's message speak; the buttons stay, so Prev still
+                 gets you back. x-if rather than x-show, matching the
+                 table's error row: the line is either true or not there. -->
+            <template x-if="!error">
+              <span class="pagination-info">
                 Showing <span x-text="((page-1)*size+1)"></span>-<span x-text="Math.min(page*size, pageableTotal())"></span>
                 of <span x-text="total.toLocaleString()"></span> events
-                <span class="text-muted" x-show="total > maxWindow"
-                      x-text="'(paging reaches the first ' + maxWindow.toLocaleString() + '; narrow the filters or the time range to see the rest)'"></span>
-            </span>
+                <template x-if="total > maxWindow">
+                  <span class="text-muted"
+                        x-text="'(paging reaches the first ' + maxWindow.toLocaleString() + '; narrow the filters or the time range to see the rest)'"></span>
+                </template>
+              </span>
+            </template>
             <div class="pagination-buttons">
                 <button class="btn btn-sm btn-secondary" @click="prevPage()" :disabled="page <= 1">Prev</button>
                 <button class="btn btn-sm btn-secondary" @click="nextPage()" :disabled="page * size >= pageableTotal()">Next</button>
