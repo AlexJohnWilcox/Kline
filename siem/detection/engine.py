@@ -42,7 +42,7 @@ def _resolve_field(name: str) -> str:
     return f"parsed.{name}"
 
 
-def _condition_to_es_clause(cond: RuleCondition) -> dict[str, Any] | None:
+def _condition_to_es_clause(cond: RuleCondition) -> dict[str, Any]:
     """Translate a RuleCondition to an Elasticsearch query clause."""
     field = _resolve_field(cond.field)
 
@@ -73,8 +73,15 @@ def _condition_to_es_clause(cond: RuleCondition) -> dict[str, Any] | None:
         case "exists":
             return {"exists": {"field": field}}
         case _:
+            # Unreachable for a rule that came through RuleCondition, which
+            # rejects anything outside RuleOperator. Defence in depth for
+            # the paths that do not (model_construct, a future operator
+            # added to the Literal and forgotten here): match nothing.
+            # Returning None dropped the clause, and a dropped clause makes
+            # a rule *broader*. A broken rule must never be more permissive
+            # than a working one.
             logger.warning("unknown_condition_operator", operator=cond.operator)
-            return None
+            return {"match_none": {}}
 
 
 def build_rule_query(rule: DetectionRule) -> dict[str, Any]:
@@ -89,9 +96,10 @@ def build_rule_query(rule: DetectionRule) -> dict[str, Any]:
 
     # Rule conditions
     for cond in rule.conditions:
-        clause = _condition_to_es_clause(cond)
-        if clause:
-            must.append(clause)
+        # No `if clause:` guard. Dropping a clause silently widens the
+        # rule; every operator now yields a clause, including the
+        # fail-closed one for an operator we do not recognise.
+        must.append(_condition_to_es_clause(cond))
 
     # Time window
     time_from = (datetime.now(UTC) - timedelta(seconds=rule.window_seconds)).isoformat()

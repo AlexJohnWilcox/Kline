@@ -6,14 +6,16 @@ from pydantic import BaseModel
 
 from config.settings import settings
 from siem.models.event import EventSeverity
-from siem.models.rule import DetectionRule
+from siem.models.rule import DetectionRule, RuleOperator
 
 router = APIRouter(prefix="/api/v1/rules", tags=["rules"])
 
 
 class RuleConditionInput(BaseModel):
     field: str
-    operator: str
+    # Same closed set as RuleCondition, so a typo is a 422 at the moment
+    # someone saves the rule rather than a silently widened query later.
+    operator: RuleOperator
     value: str | int | float | bool | None = None
 
 

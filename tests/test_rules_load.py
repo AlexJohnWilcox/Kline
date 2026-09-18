@@ -1,7 +1,13 @@
+from typing import get_args
+
+import pytest
+from pydantic import ValidationError
+
 from config.settings import settings
 from siem.detection.engine import _condition_to_es_clause, build_rule_query
 from siem.detection.rule_loader import load_rules
-from siem.models.rule import RuleCondition
+from siem.models.event import EventSeverity
+from siem.models.rule import DetectionRule, RuleCondition, RuleOperator
 from siem.storage.indices import EVENT_INDEX_TEMPLATE
 
 
@@ -126,10 +132,64 @@ def test_contains_still_ors_its_terms_for_the_rules_that_rely_on_it():
     assert clause == {"match": {"message": "REJECT"}}
 
 
-def test_an_unknown_operator_builds_nothing_rather_than_matching_everything():
-    assert (
-        _condition_to_es_clause(
-            RuleCondition(field="message", operator="phrasey", value="x")
+# --- an unrecognised operator must never widen a rule ----------------------
+#
+# _condition_to_es_clause returned None for an unknown operator and
+# build_rule_query dropped the clause. Dropping the only condition of a
+# threshold-1 rule does not disable it -- it removes the one thing
+# narrowing it, so "every syslog event in the last 900 seconds, severity
+# high" fires from a one-character typo. Two layers now: the operator is a
+# closed set on the model, so the mistake is refused where it is made; and
+# the translator fails closed for anything that still reaches it.
+
+
+def test_the_model_refuses_an_operator_the_engine_cannot_translate():
+    """Loudly, at the point of the mistake: a ValidationError, which the
+    API returns as a 422 and the loader logs as rule_load_error."""
+    with pytest.raises(ValidationError):
+        RuleCondition(field="message", operator="phrasey", value="x")
+
+
+def test_every_operator_the_model_accepts_has_a_translation():
+    """The closed set and the match statement must not drift apart."""
+    for operator in get_args(RuleOperator):
+        clause = _condition_to_es_clause(
+            RuleCondition(field="message", operator=operator, value="x")
         )
-        is None
+        assert clause != {"match_none": {}}, operator
+
+
+def test_an_unknown_operator_builds_a_clause_that_matches_nothing():
+    """Defence in depth, past the model. The old name said "builds
+    nothing", which is what made the rule match everything."""
+    cond = RuleCondition.model_construct(
+        field="message", operator="phrasey", value="x"
     )
+
+    assert _condition_to_es_clause(cond) == {"match_none": {}}
+
+
+def test_a_rule_with_an_unknown_operator_matches_nothing_not_everything():
+    """The defect at the level it actually bit: the whole query."""
+    rule = DetectionRule.model_construct(
+        id="tunnel-rotation-failed",
+        name="x",
+        description="y",
+        severity=EventSeverity.HIGH,
+        enabled=True,
+        source=None,
+        category=None,
+        conditions=[
+            RuleCondition.model_construct(
+                field="message", operator="phrasey", value="did not carry traffic"
+            )
+        ],
+        threshold=1,
+        window_seconds=900,
+        group_by=None,
+        tags=[],
+    )
+
+    must = build_rule_query(rule)["query"]["bool"]["must"]
+
+    assert {"match_none": {}} in must, must
