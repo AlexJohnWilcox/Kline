@@ -47,6 +47,13 @@ async def search_events(
         "sort": [{"timestamp": {"order": "desc"}}],
         "from": (page - 1) * size,
         "size": size,
+        # Elasticsearch stops counting at 10,000 and says so in
+        # hits.total.relation ("gte"). We read hits.total.value and ignore the
+        # relation, so without this the UI renders a ceiling as a total.
+        # Exact counting over ~800k docs in single-shard daily indices is
+        # measured at no perceptible cost; it would be a real decision at a
+        # hundred million.
+        "track_total_hits": True,
     }
 
     result = await es.search(index="siem-events-*", body=body)
@@ -104,6 +111,9 @@ async def get_event_stats(
     body = {
         "query": {"range": {"timestamp": {"gte": time_from}}},
         "size": 0,
+        # Elasticsearch stops counting at 10,000 and says so in
+        # hits.total.relation ("gte"). See search_events for details.
+        "track_total_hits": True,
         "aggs": {
             "by_source": {"terms": {"field": "source", "size": 20}},
             "by_severity": {"terms": {"field": "severity", "size": 10}},
