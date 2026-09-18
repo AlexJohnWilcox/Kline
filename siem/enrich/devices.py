@@ -6,10 +6,6 @@ already merges the two into the dashboard's data.json every 30 seconds. Kline
 reads that and nothing more.
 """
 
-import structlog
-
-logger = structlog.get_logger()
-
 
 def parse_roster(payload: dict) -> dict[str, str]:
     """Build {ip: name} from the sanctum's data.json.
@@ -19,6 +15,8 @@ def parse_roster(payload: dict) -> dict[str, str]:
     here and is skipped; one with no name falls back to its MAC, which is what
     the dashboard itself shows for a nameless wanderer.
     """
+    if not isinstance(payload, dict):
+        return {}
     out: dict[str, str] = {}
     for key in ("wanderers", "devices"):
         entries = payload.get(key)

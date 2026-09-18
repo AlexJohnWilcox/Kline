@@ -47,3 +47,11 @@ def test_a_device_never_overwrites_itself_with_a_worse_name():
         "wanderers": [{"name": "", "ip": "192.168.10.203", "mac": "b4:2e:99:e2:e9:3d"}],
     }
     assert parse_roster(payload)["192.168.10.203"] == "erebus"
+
+
+def test_malformed_top_level_payloads_yield_empty_map():
+    """Non-dict payloads are handled gracefully, not raised."""
+    assert parse_roster(None) == {}
+    assert parse_roster([]) == {}
+    assert parse_roster("not a dict") == {}
+    assert parse_roster(42) == {}
