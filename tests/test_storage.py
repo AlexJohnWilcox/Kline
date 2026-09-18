@@ -104,3 +104,33 @@ async def test_partial_bulk_failures_are_subtracted_from_the_count():
         _event(datetime(2026, 9, 17, 2, 0, tzinfo=UTC)),
     ]
     assert await index_events_bulk(es, events) == 1
+
+
+from siem.storage.indices import ALERT_INDEX_TEMPLATE
+
+
+def test_alert_context_is_explicitly_mapped():
+    props = ALERT_INDEX_TEMPLATE["template"]["mappings"]["properties"]
+    ctx = props["context"]
+    assert ctx["properties"]["event_count"] == {"type": "long"}
+
+
+def test_hosts_keeps_a_keyword_subfield_so_aggregations_work_on_old_indices():
+    """A terms agg needs .keyword; a bare keyword type would remove it.
+
+    Measured against the live index: aggregating on context.hosts errors with
+    "Fielddata is disabled", while context.hosts.keyword returns buckets. The
+    existing monthly index keeps its dynamic text+keyword mapping, so the
+    subfield has to exist on new indices too or the aggregation breaks there
+    instead.
+    """
+    ctx = ALERT_INDEX_TEMPLATE["template"]["mappings"]["properties"]["context"]
+    hosts = ctx["properties"]["hosts"]
+    assert hosts["type"] == "text"
+    assert hosts["fields"]["keyword"]["type"] == "keyword"
+
+
+def test_alert_context_stays_dynamic_for_other_rules():
+    """Other rules put their own shapes in context; they must keep working."""
+    ctx = ALERT_INDEX_TEMPLATE["template"]["mappings"]["properties"]["context"]
+    assert ctx["dynamic"] is True

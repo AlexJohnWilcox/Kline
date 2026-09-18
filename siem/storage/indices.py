@@ -61,6 +61,29 @@ ALERT_INDEX_TEMPLATE = {
                 "matched_events": {"type": "keyword"},
                 "ai_explanation": {"type": "text"},
                 "status": {"type": "keyword"},
+                "resolution_reason": {"type": "text"},
+                "context": {
+                    # Other rules put their own shapes in here, so dynamic
+                    # stays on. hosts is declared because the device panel
+                    # queries it: left dynamic it becomes analysed text, and a
+                    # term query would match only by the accident that the
+                    # standard analyser does not split a dotted IPv4.
+                    "dynamic": True,
+                    "properties": {
+                        # text + keyword mirrors what dynamic mapping already
+                        # produced, deliberately. The device panel runs a terms
+                        # aggregation, and an aggregation - unlike a term query
+                        # - refuses an analysed text field outright ("Fielddata
+                        # is disabled"). It must aggregate on .keyword, so that
+                        # subfield has to exist on new indices as well as the
+                        # ones already written.
+                        "hosts": {
+                            "type": "text",
+                            "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
+                        },
+                        "event_count": {"type": "long"},
+                    },
+                },
             }
         },
     },
