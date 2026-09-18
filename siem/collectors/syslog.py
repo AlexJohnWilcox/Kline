@@ -28,6 +28,53 @@ SYSLOG_ISO_PATTERN = re.compile(
     r"(?P<message>.*)$"
 )
 
+# OpenWrt logread raw replay: only ever seen on a boot-time replay of the
+# Gate's raw `logread` output, appended straight to the tailed file. The
+# live feed never looks like this - the receiving syslog daemon rewrites it
+# into SYSLOG_PATTERN before it touches disk.
+#
+#   "Thu Sep 18 03:11:50 2026 daemon.notice rotate-road[123]: message"
+#
+# Four-digit year, a leading weekday, and a facility.level field sitting
+# where BSD syslog would put a hostname - these lines carry no hostname at
+# all. "host" is deliberately not a named group here; parse_syslog_line
+# hardcodes it, since every line in this format comes from the Gate.
+SYSLOG_OPENWRT_PATTERN = re.compile(
+    r"^\w{3}\s+"
+    r"(?P<timestamp>\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+"
+    r"(?P<facility>\w+)\.(?P<level>\w+)\s+"
+    r"(?P<process>\S+?)(?:\[(?P<pid>\d+)\])?:\s+"
+    r"(?P<message>.*)$"
+)
+
+# Every one of these lines is emitted by the Gate, so its host is hardcoded
+# rather than left to default to this machine's own hostname.
+OPENWRT_HOST = "gate"
+
+# syslog facility.level -> minimum severity. Applied as a floor, not an
+# override: message-text detection (FAILED_PATTERNS / CRITICAL_PATTERNS)
+# can still push severity higher, e.g. rotate-road logs its own rollback at
+# .notice but the "FAIL ... did not carry traffic" text still means MEDIUM.
+SYSLOG_LEVEL_SEVERITY = {
+    "emerg": EventSeverity.CRITICAL,
+    "panic": EventSeverity.CRITICAL,
+    "alert": EventSeverity.CRITICAL,
+    "crit": EventSeverity.CRITICAL,
+    "err": EventSeverity.HIGH,
+    "error": EventSeverity.HIGH,
+    "warning": EventSeverity.MEDIUM,
+    "warn": EventSeverity.MEDIUM,
+    "notice": EventSeverity.LOW,
+    "info": EventSeverity.LOW,
+    "debug": EventSeverity.LOW,
+}
+_SEVERITY_ORDER = [
+    EventSeverity.LOW,
+    EventSeverity.MEDIUM,
+    EventSeverity.HIGH,
+    EventSeverity.CRITICAL,
+]
+
 # Patterns for categorizing and severity
 AUTH_PROCESSES = {"sshd", "sudo", "login", "su", "passwd", "useradd", "userdel", "groupadd"}
 FAILED_PATTERNS = re.compile(
@@ -65,11 +112,14 @@ def should_ingest(line: str, patterns: list[str]) -> bool:
 def parse_syslog_line(line: str) -> Event | None:
     """Parse a single syslog line into an Event."""
     line = line.strip()
+    fmt = "bsd"
     match = SYSLOG_PATTERN.match(line)
-    iso_format = False
     if not match:
         match = SYSLOG_ISO_PATTERN.match(line)
-        iso_format = True
+        fmt = "iso"
+    if not match:
+        match = SYSLOG_OPENWRT_PATTERN.match(line)
+        fmt = "openwrt"
     if not match:
         return None
 
@@ -77,8 +127,14 @@ def parse_syslog_line(line: str) -> Event | None:
 
     # Parse timestamp
     try:
-        if iso_format:
+        if fmt == "iso":
             timestamp = datetime.fromisoformat(groups['timestamp'])
+        elif fmt == "openwrt":
+            # Same naive-datetime shape as the BSD branch below (no offset
+            # in the source format); matches its existing DTZ007 tolerance.
+            timestamp = datetime.strptime(  # noqa: DTZ007
+                groups["timestamp"], "%b %d %H:%M:%S %Y"
+            )
         else:
             ts_str = f"{datetime.now(UTC).year} {groups['timestamp']}"
             timestamp = datetime.strptime(ts_str, "%Y %b %d %H:%M:%S")
@@ -93,12 +149,22 @@ def parse_syslog_line(line: str) -> Event | None:
     if process.lower() in AUTH_PROCESSES:
         category = EventCategory.AUTH
 
-    # Determine severity
+    # Determine severity from the message text
     severity = EventSeverity.LOW
     if CRITICAL_PATTERNS.search(message):
         severity = EventSeverity.CRITICAL
     elif FAILED_PATTERNS.search(message):
         severity = EventSeverity.MEDIUM
+
+    # OpenWrt lines carry an explicit facility.level; treat it as a floor so
+    # an "err"/"crit" line is never buried at LOW just because its message
+    # text doesn't happen to match FAILED_PATTERNS/CRITICAL_PATTERNS.
+    if fmt == "openwrt":
+        level_severity = SYSLOG_LEVEL_SEVERITY.get((groups.get("level") or "").lower())
+        if level_severity is not None and (
+            _SEVERITY_ORDER.index(level_severity) > _SEVERITY_ORDER.index(severity)
+        ):
+            severity = level_severity
 
     # Extract parsed fields
     parsed: dict = {
@@ -106,15 +172,19 @@ def parse_syslog_line(line: str) -> Event | None:
     }
     if groups.get("pid"):
         parsed["pid"] = int(groups["pid"])
+    if fmt == "openwrt":
+        parsed["facility"] = f"{groups['facility']}.{groups['level']}"
 
     # Extract common auth fields
     if category == EventCategory.AUTH:
         _extract_auth_fields(message, parsed)
 
+    host = groups.get("host") or (OPENWRT_HOST if fmt == "openwrt" else socket.gethostname())
+
     return Event(
         timestamp=timestamp,
         source="syslog",
-        host=groups.get("host", socket.gethostname()),
+        host=host,
         severity=severity,
         category=category,
         message=message,
