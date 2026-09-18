@@ -152,3 +152,26 @@ async def test_the_alert_aggregation_uses_the_keyword_subfield():
     await get_device_stats(es)
     field = es.alert_body["aggs"]["by_host"]["terms"]["field"]
     assert field == "context.hosts.keyword"
+
+
+@pytest.mark.asyncio
+async def test_resolved_alerts_are_excluded_from_the_count():
+    """Open alerts are counted; resolved ones must not be. The fixture
+    does not vary status, so this test would pass even if the must_not
+    clause were dropped — hence we assert the clause is in the query.
+    """
+
+    class BodyCapturingES(DeviceES):
+        def __init__(self):
+            super().__init__([_bucket("192.168.10.241", 1, 0, 1.0)])
+            self.alert_body = None
+
+        async def search(self, index=None, body=None, **kw):
+            if index and "alerts" in index:
+                self.alert_body = body
+            return await super().search(index=index, body=body, **kw)
+
+    es = BodyCapturingES()
+    await get_device_stats(es)
+    must_not = es.alert_body["query"]["bool"]["must_not"]
+    assert {"term": {"status": "resolved"}} in must_not
