@@ -46,7 +46,8 @@ async def lifespan(app: FastAPI):
     await seed_admin_if_missing(settings.admin_username, settings.admin_password)
 
     # Register and start collectors
-    collector_runner.register(SyslogCollector())
+    syslog_paths = settings.syslog_path_list()
+    collector_runner.register(SyslogCollector(paths=syslog_paths or None))
     collector_runner.register(DockerCollector())
     collector_runner.register(NetworkCollector())
     if settings.pihole_enabled:

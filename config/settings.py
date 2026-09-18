@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # "entire database" (~1.28 million rows). ge=1 forbids the trap.
     pihole_backfill_days: int = Field(default=30, ge=1)
 
+    # Extra syslog files to tail, comma separated. Empty means the collector's
+    # own defaults. The Gate's remote stream lands somewhere no default list
+    # knows about, so it has to be named here.
+    syslog_paths: str = ""
+
     # Device names - resolved from the sanctum's own roster at render time,
     # never written onto events. Off by default: without it every host shows
     # as its raw address, which is the behaviour this replaces.
@@ -78,6 +83,10 @@ class Settings(BaseSettings):
     rules_dir: Path = Path("rules")
     templates_dir: Path = Path("frontend/templates")
     static_dir: Path = Path("frontend/static")
+
+    def syslog_path_list(self) -> list[Path]:
+        """Parse syslog_paths, tolerating spaces and trailing separators."""
+        return [Path(p.strip()) for p in self.syslog_paths.split(",") if p.strip()]
 
 
 settings = Settings()

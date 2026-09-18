@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -105,3 +107,23 @@ def test_pihole_backfill_days_valid(monkeypatch):
     monkeypatch.setenv("PIHOLE_BACKFILL_DAYS", "365")
     s = Settings(_env_file=None)
     assert s.pihole_backfill_days == 365
+
+
+def test_syslog_paths_defaults_to_empty_meaning_collector_defaults(declared_defaults):
+    assert Settings(_env_file=None).syslog_paths == ""
+
+
+def test_syslog_paths_parses_a_comma_separated_list(monkeypatch):
+    monkeypatch.setenv("SYSLOG_PATHS", "/var/log/syslog,/var/log/gate.log")
+    s = Settings(_env_file=None)
+    assert s.syslog_path_list() == [Path("/var/log/syslog"), Path("/var/log/gate.log")]
+
+
+def test_syslog_paths_tolerates_spaces_and_trailing_commas(monkeypatch):
+    monkeypatch.setenv("SYSLOG_PATHS", " /a , /b , ")
+    assert Settings(_env_file=None).syslog_path_list() == [Path("/a"), Path("/b")]
+
+
+def test_an_empty_setting_yields_an_empty_list_not_a_path_to_nothing(monkeypatch):
+    monkeypatch.setenv("SYSLOG_PATHS", "")
+    assert Settings(_env_file=None).syslog_path_list() == []
