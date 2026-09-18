@@ -175,3 +175,43 @@ async def test_resolved_alerts_are_excluded_from_the_count():
     await get_device_stats(es)
     must_not = es.alert_body["query"]["bool"]["must_not"]
     assert {"term": {"status": "resolved"}} in must_not
+
+
+# ── Degrade paths must not invent facts ──
+
+
+@pytest.mark.asyncio
+async def test_unreadable_alerts_report_unknown_not_zero():
+    """A failed alert lookup is not "no open alerts".
+
+    Zero is an assertion about the alert index; the panel had no business
+    making it after the aggregation raised.
+    """
+
+    class AlertsDownES(DeviceES):
+        async def search(self, index=None, body=None, **kw):
+            if index and "alerts" in index:
+                raise RuntimeError("no alert index / fielddata disabled")
+            return await super().search(index=index, body=body, **kw)
+
+    es = AlertsDownES([_bucket("192.168.10.241", 100, 40, 1.0)])
+    assert (await get_device_stats(es))[0]["open_alerts"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_readable_but_silent_alert_index_still_reports_zero():
+    """Unknown is only for failure. An answer of "none" is still zero."""
+    es = DeviceES([_bucket("192.168.10.241", 100, 40, 1.0)], alert_buckets=[])
+    assert (await get_device_stats(es))[0]["open_alerts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_no_event_indices_yet_is_an_empty_panel_not_a_500():
+    """ES omits "aggregations" when the wildcard matches nothing at all,
+    which is every fresh install before the first event lands."""
+
+    class FreshInstallES:
+        async def search(self, index=None, body=None, **kw):
+            return {"hits": {"total": {"value": 0}, "hits": []}}
+
+    assert await get_device_stats(FreshInstallES()) == []

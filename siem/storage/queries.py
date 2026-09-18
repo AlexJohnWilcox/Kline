@@ -160,6 +160,12 @@ async def get_device_stats(
         "track_total_hits": True,
         "aggs": {
             "by_host": {
+                # size 50: the panel lists the busiest 50 hosts and says
+                # nothing about a 51st. Comfortable for this network (~20
+                # devices), but past 50 the list truncates silently and the
+                # overflow devices also lose their alert badges, since the
+                # alert aggregation below is capped the same way. Raise both
+                # together if the panel ever has to be complete.
                 "terms": {"field": "host", "size": 50, "order": {"_count": "desc"}},
                 "aggs": {
                     "blocked": {"filter": {"term": {"parsed.blocked": True}}},
@@ -169,7 +175,10 @@ async def get_device_stats(
         },
     }
     result = await es.search(index="siem-events-*", body=events_body)
-    buckets = result["aggregations"]["by_host"]["buckets"]
+    # Elasticsearch omits "aggregations" entirely when the wildcard matches no
+    # index, which is a fresh install before the first event is written. An
+    # unguarded read there is a KeyError and a 500 on /api/v1/devices.
+    buckets = result.get("aggregations", {}).get("by_host", {}).get("buckets", [])
 
     # Open alerts per device. context.hosts carries the addresses an alert was
     # raised for. A resolved alert is not something the panel should badge.
@@ -180,19 +189,27 @@ async def get_device_stats(
     alerts_body = {
         "query": {"bool": {"must_not": [{"term": {"status": "resolved"}}]}},
         "size": 0,
+        # size 50, matching the host aggregation above: a device outside the
+        # busiest 50 would not be listed to badge anyway.
         "aggs": {"by_host": {"terms": {"field": "context.hosts.keyword", "size": 50}}},
     }
+    # None, not {}: "we could not read the alert index" is not "there are no
+    # open alerts". A SIEM must not assert the absence of alerts it failed to
+    # look for.
+    alert_counts: dict[str, int] | None
     try:
         alert_result = await es.search(index="siem-alerts-*", body=alerts_body)
         alert_counts = {
             b["key"]: b["doc_count"]
-            for b in alert_result["aggregations"]["by_host"]["buckets"]
+            for b in alert_result.get("aggregations", {})
+            .get("by_host", {})
+            .get("buckets", [])
         }
     except Exception:
         # No alert index yet, or a mapping that cannot aggregate. The panel is
         # still useful without badges; it is not worth failing the whole call.
         logger.exception("device_alert_counts_failed")
-        alert_counts = {}
+        alert_counts = None
 
     rows: list[dict[str, Any]] = []
     for b in buckets:
@@ -206,7 +223,12 @@ async def get_device_stats(
                 "last_seen": b["last_seen"].get("value_as_string")
                 if b["last_seen"].get("value") is not None
                 else None,
-                "open_alerts": alert_counts.get(b["key"], 0),
+                # null when the count is unknown. The panel's badge is
+                # x-show="d.open_alerts > 0", so null hides it - the same as
+                # zero on screen, but it no longer *claims* zero.
+                "open_alerts": (
+                    alert_counts.get(b["key"], 0) if alert_counts is not None else None
+                ),
             }
         )
     return rows
