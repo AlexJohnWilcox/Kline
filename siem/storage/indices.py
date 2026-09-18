@@ -149,6 +149,18 @@ STATE_INDEX_TEMPLATE = {
 }
 
 
+DEVICE_INDEX_TEMPLATE = {
+    "index_patterns": ["siem-devices"],
+    "template": {
+        "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+        # The map is one small object of arbitrary keys. Indexing every
+        # address as a field would be pointless and would grow the mapping
+        # every time a device appears, so it is stored and not indexed.
+        "mappings": {"properties": {"names": {"type": "object", "enabled": False}}},
+    },
+}
+
+
 def get_event_index(when: datetime | None = None) -> str:
     """Event indices are daily, so a 30-day retention window can be expressed."""
     when = when or datetime.now(UTC)
@@ -192,3 +204,9 @@ async def setup_indices(es: AsyncElasticsearch) -> None:
         body=STATE_INDEX_TEMPLATE,
     )
     logger.info("index_template_created", name="siem-state")
+
+    await es.indices.put_index_template(
+        name="siem-devices",
+        body=DEVICE_INDEX_TEMPLATE,
+    )
+    logger.info("index_template_created", name="siem-devices")

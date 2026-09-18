@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     # "entire database" (~1.28 million rows). ge=1 forbids the trap.
     pihole_backfill_days: int = Field(default=30, ge=1)
 
+    # Device names - resolved from the sanctum's own roster at render time,
+    # never written onto events. Off by default: without it every host shows
+    # as its raw address, which is the behaviour this replaces.
+    device_names_enabled: bool = False
+    device_roster_url: str = "https://dash.lan/data.json"
+    # Caddy's internal CA. Published by the dashboard at /caddy-root.crt.
+    device_roster_ca: str | None = None
+    device_roster_refresh_seconds: int = Field(default=300, ge=30)
+
     # Auth
     # If SESSION_SECRET is unset, a random one is generated per process
     # (sessions invalidate on restart). Set it in .env for stable sessions.

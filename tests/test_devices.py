@@ -55,3 +55,93 @@ def test_malformed_top_level_payloads_yield_empty_map():
     assert parse_roster([]) == {}
     assert parse_roster("not a dict") == {}
     assert parse_roster(42) == {}
+
+
+import httpx
+import pytest
+
+from siem.enrich.devices import DeviceResolver
+
+
+class FakeES:
+    def __init__(self, stored=None):
+        self.stored = stored
+        self.indexed = []
+
+    async def get(self, index, id):
+        if self.stored is None:
+            from elasticsearch import NotFoundError
+
+            raise NotFoundError("not found", {}, {})
+        return {"_source": {"names": self.stored}}
+
+    async def index(self, index, id, document, refresh=False):
+        self.indexed.append((index, id, document))
+        self.stored = document["names"]
+
+
+def _resolver(handler):
+    r = DeviceResolver(url="https://dash.lan/data.json")
+    r._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return r
+
+
+@pytest.mark.asyncio
+async def test_a_good_fetch_populates_and_caches():
+    es = FakeES()
+    r = _resolver(lambda req: httpx.Response(200, json=SAMPLE))
+    names = await r.refresh(es)
+    assert names["192.168.10.241"] == "scrying-glass"
+    assert r.names["192.168.10.241"] == "scrying-glass"
+    index, doc_id, doc = es.indexed[0]
+    assert (index, doc_id) == ("siem-devices", "roster")
+    assert doc["names"]["192.168.10.2"] == "oracle"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fetch_keeps_the_last_good_map():
+    es = FakeES()
+    r = _resolver(lambda req: httpx.Response(200, json=SAMPLE))
+    await r.refresh(es)
+
+    r._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda req: (_ for _ in ()).throw(httpx.ConnectError("down"))
+        )
+    )
+    names = await r.refresh(es)
+    assert names["192.168.10.241"] == "scrying-glass", "a blip must not erase names"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fetch_with_no_prior_map_yields_empty_not_an_exception():
+    es = FakeES()
+    r = _resolver(lambda req: (_ for _ in ()).throw(httpx.ConnectError("down")))
+    assert await r.refresh(es) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_non_200_is_a_failure_not_a_parse():
+    es = FakeES()
+    r = _resolver(lambda req: httpx.Response(502, text="erebus asleep"))
+    assert await r.refresh(es) == {}
+
+
+@pytest.mark.asyncio
+async def test_unparseable_json_is_a_failure_not_a_crash():
+    es = FakeES()
+    r = _resolver(lambda req: httpx.Response(200, text="<html>nope</html>"))
+    assert await r.refresh(es) == {}
+
+
+@pytest.mark.asyncio
+async def test_the_cached_map_is_loaded_on_startup():
+    es = FakeES(stored={"192.168.10.241": "scrying-glass"})
+    r = DeviceResolver(url="https://dash.lan/data.json")
+    assert (await r.load(es))["192.168.10.241"] == "scrying-glass"
+
+
+@pytest.mark.asyncio
+async def test_no_cache_yet_loads_as_empty():
+    r = DeviceResolver(url="https://dash.lan/data.json")
+    assert await r.load(FakeES()) == {}
