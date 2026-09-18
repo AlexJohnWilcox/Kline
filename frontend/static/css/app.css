@@ -1359,3 +1359,30 @@ select:focus, input:focus {
     opacity: 0.6;
     cursor: not-allowed;
 }
+
+/* Events page device panel. Deliberately not .sidebar - that is the app's
+   main navigation rail in base.html and the names would collide. */
+.events-layout { display: grid; grid-template-columns: 260px 1fr; gap: 16px; align-items: start; }
+.device-panel { background: var(--bg-card, #16181d); border: 1px solid var(--border, #262a33);
+  border-radius: 6px; padding: 8px; max-height: 70vh; overflow-y: auto; }
+.device-panel-head { display: flex; justify-content: space-between; align-items: baseline;
+  padding: 6px 8px 10px; font-weight: 600; }
+.device-panel-sub { font-size: 11px; opacity: .55; font-weight: 400; }
+.device-row { display: block; width: 100%; text-align: left; background: none;
+  border: 1px solid transparent; border-radius: 5px; padding: 8px; cursor: pointer;
+  color: inherit; font: inherit; }
+.device-row:hover { background: var(--bg-hover, #1d2027); }
+.device-row.active { border-color: var(--accent, #4a9eff); background: var(--bg-hover, #1d2027); }
+.device-row-main { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.device-name { font-weight: 600; font-size: 13px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.device-alerts { flex: 0 0 auto; background: var(--danger, #ff5c5c); color: #fff;
+  border-radius: 9px; padding: 0 6px; font-size: 11px; line-height: 17px; }
+.device-row-meta { display: flex; justify-content: space-between; font-size: 11px;
+  opacity: .65; margin-top: 2px; }
+.device-row-seen { font-size: 11px; opacity: .4; margin-top: 1px; }
+
+@media (max-width: 900px) {
+  .events-layout { grid-template-columns: 1fr; }
+  .device-panel { max-height: 240px; }
+}
