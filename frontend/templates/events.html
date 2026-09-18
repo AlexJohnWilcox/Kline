@@ -81,7 +81,10 @@
         </div>
     </template>
 
-    <div class="events-layout" :class="{ 'no-panel': !devices.length }">
+    <!-- x-cloak: until Alpine binds :class, the grid is 260px + an empty
+         aside, then no-panel applies, then the panel loads - two visible
+         width jumps on every page load. Hidden until the state is real. -->
+    <div class="events-layout" x-cloak :class="{ 'no-panel': !devices.length }">
       <aside class="device-panel" x-show="devices.length">
         <div class="device-panel-head">
             <span>Devices</span>
