@@ -27,6 +27,7 @@ logger = structlog.get_logger()
 collector_runner = CollectorRunner()
 detection_engine = DetectionEngine()
 _retention_task: asyncio.Task | None = None
+_device_task: asyncio.Task | None = None
 
 # Templates
 templates = Jinja2Templates(directory=str(settings.templates_dir))
@@ -67,6 +68,10 @@ async def lifespan(app: FastAPI):
     global _retention_task
     _retention_task = asyncio.create_task(retention_loop())
 
+    # Start device roster refresh loop
+    global _device_task
+    _device_task = asyncio.create_task(device_refresh_loop())
+
     # Check Ollama connectivity
     ollama = get_ollama_client()
     if await ollama.is_available():
@@ -85,6 +90,14 @@ async def lifespan(app: FastAPI):
             await _retention_task
         except asyncio.CancelledError:
             pass
+    if _device_task:
+        _device_task.cancel()
+        try:
+            await _device_task
+        except asyncio.CancelledError:
+            pass
+    if device_resolver is not None:
+        await device_resolver.aclose()
     await detection_engine.stop()
     await collector_runner.stop()
     await close_ollama_client()
@@ -144,6 +157,8 @@ from siem.api.alerts import router as alerts_router
 from siem.api.auth import router as auth_router
 from siem.api.events import router as events_router
 from siem.api.dashboard import router as dashboard_router
+from siem.api.devices import device_refresh_loop, resolver as device_resolver
+from siem.api.devices import router as devices_router
 from siem.api.health import router as health_router
 from siem.api.rules import router as rules_router
 from siem.api.settings import router as settings_router
@@ -154,6 +169,7 @@ app.include_router(alerts_router)
 app.include_router(auth_router)
 app.include_router(events_router)
 app.include_router(dashboard_router)
+app.include_router(devices_router)
 app.include_router(health_router)
 app.include_router(rules_router)
 app.include_router(settings_router)
