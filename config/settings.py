@@ -83,6 +83,12 @@ class Settings(BaseSettings):
     admin_username: str = "alexwilcox"
     admin_password: str = "REDACTED"
 
+    # New-device detection. Off by default: it writes alerts, and it must be
+    # seeded before it is useful.
+    new_client_enabled: bool = False
+    new_client_interval_seconds: int = Field(default=300, ge=60)
+    new_client_seed_days: int = Field(default=30, ge=1)
+
     # Paths
     rules_dir: Path = Path("rules")
     templates_dir: Path = Path("frontend/templates")

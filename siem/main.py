@@ -15,6 +15,7 @@ from siem.collectors.network import NetworkCollector
 from siem.collectors.pihole import PiholeCollector
 from siem.collectors.syslog import SyslogCollector
 from siem.detection.engine import DetectionEngine
+from siem.detection.new_client import new_client_loop
 from siem.ai.client import close_ollama_client, get_ollama_client
 from siem.storage.es_client import close_es_client, get_es_client
 from siem.storage.indices import setup_indices
@@ -28,6 +29,7 @@ collector_runner = CollectorRunner()
 detection_engine = DetectionEngine()
 _retention_task: asyncio.Task | None = None
 _device_task: asyncio.Task | None = None
+_new_client_task: asyncio.Task | None = None
 
 # Templates
 templates = Jinja2Templates(directory=str(settings.templates_dir))
@@ -79,6 +81,10 @@ async def lifespan(app: FastAPI):
     global _device_task
     _device_task = asyncio.create_task(device_refresh_loop())
 
+    # Start new-client detection loop
+    global _new_client_task
+    _new_client_task = asyncio.create_task(new_client_loop())
+
     # Check Ollama connectivity
     ollama = get_ollama_client()
     if await ollama.is_available():
@@ -101,6 +107,12 @@ async def lifespan(app: FastAPI):
         _device_task.cancel()
         try:
             await _device_task
+        except asyncio.CancelledError:
+            pass
+    if _new_client_task:
+        _new_client_task.cancel()
+        try:
+            await _new_client_task
         except asyncio.CancelledError:
             pass
     if device_resolver is not None:
