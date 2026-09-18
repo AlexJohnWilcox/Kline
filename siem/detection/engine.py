@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -302,7 +303,7 @@ class DetectionEngine:
         event_ids = [hit["_id"] for hit in hits[:50]]
         context = self._build_alert_context(hits)
 
-        suppression_msg = await self._check_suppressions(rule, context)
+        suppression_msg = await self._check_suppressions(rule, context, es)
         if suppression_msg:
             # Create auto-resolved alert
             alert = Alert(
@@ -464,79 +465,39 @@ class DetectionEngine:
             pass  # Index may not exist yet
 
     async def _check_suppressions(
-        self, rule: DetectionRule, context: dict
+        self, rule: DetectionRule, context: dict, es: AsyncElasticsearch | None = None
     ) -> str | None:
-        """Check if a suppression matches this rule+context.
+        """Check whether a suppression matches this rule+context.
 
-        Returns a suppression message if suppressed, None otherwise.
-        Step 1: deterministic field match. Step 2: AI fallback.
+        Thin wrapper over the module-level check_suppressions, carrying this
+        rule evaluation's AI budget. new_client.py raises alerts of its own
+        and calls the same function directly.
         """
-        try:
-            es = await get_es_client()
-            result = await es.search(
-                index="siem-suppressions",
-                body={
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"rule_id": rule.id}},
-                                {"term": {"status": "active"}},
-                            ],
-                            "should": [
-                                {"bool": {"must_not": {"exists": {"field": "expires_at"}}}},
-                                {"range": {"expires_at": {"gt": datetime.now(UTC).isoformat()}}},
-                            ],
-                            "minimum_should_match": 1,
-                        }
-                    },
-                    "size": 20,
-                },
-            )
-        except Exception:
-            return None  # Index may not exist yet
+        return await check_suppressions(
+            rule.id,
+            rule.name,
+            rule.description,
+            context,
+            spend_ai_budget=self._spend_ai_budget,
+            es=es,
+        )
 
-        hits = result["hits"]["hits"]
-        if not hits:
-            return None
+    def _spend_ai_budget(self, rule_id: str) -> bool:
+        """Take one unit of this rule evaluation's AI suppression budget.
 
-        suppressions = [Suppression.from_es_hit(h) for h in hits]
-
-        # Step 1: Deterministic match
-        for s in suppressions:
-            if s.matches_context(context):
-                logger.info("suppression_deterministic_match", suppression_id=s.id, rule_id=rule.id)
-                return f"Auto-suppressed: {s.reason} (suppression {s.id})"
-
-        # Step 2: AI fallback, but only while this rule evaluation has budget
-        # left. A grouped rule raises one alert per breaching bucket and each
-        # one lands here; unbounded, that serialises 10s-a-piece AI calls
-        # inside a 30s detection loop.
+        A grouped rule raises one alert per breaching bucket and each one
+        reaches the AI fallback; unbounded, that serialises 10s-a-piece
+        calls inside a 30s detection loop.
+        """
         if self._ai_suppression_budget <= 0:
             logger.warning(
                 "suppression_ai_budget_exhausted",
-                rule_id=rule.id,
+                rule_id=rule_id,
                 budget=AI_SUPPRESSION_BUCKET_BUDGET,
             )
-            return None
+            return False
         self._ai_suppression_budget -= 1
-
-        try:
-            from siem.ai.suppression_matcher import ai_match_suppression
-
-            for s in suppressions:
-                matched = await ai_match_suppression(
-                    suppression=s,
-                    alert_context=context,
-                    alert_rule_name=rule.name,
-                    alert_description=rule.description,
-                )
-                if matched:
-                    logger.info("suppression_ai_match", suppression_id=s.id, rule_id=rule.id)
-                    return f"AI-matched suppression: {s.reason} (suppression {s.id})"
-        except Exception:
-            logger.debug("suppression_ai_fallback_error", rule_id=rule.id)
-
-        return None
+        return True
 
     def _cleanup_cooldowns(self) -> None:
         """Remove expired cooldown entries."""
@@ -544,3 +505,84 @@ class DetectionEngine:
         expired = [k for k, v in self._cooldowns.items() if v < cutoff]
         for k in expired:
             del self._cooldowns[k]
+
+
+async def check_suppressions(
+    rule_id: str,
+    rule_name: str,
+    rule_description: str,
+    context: dict,
+    spend_ai_budget: Callable[[str], bool] | None = None,
+    es: AsyncElasticsearch | None = None,
+) -> str | None:
+    """Check whether an active suppression matches this rule+context.
+
+    Returns a suppression message if suppressed, None otherwise.
+    Step 1: deterministic field match. Step 2: AI fallback.
+
+    Module-level rather than a DetectionEngine method because the engine is
+    not the only thing that raises alerts -- new_client.py writes its own --
+    and an alert-writing path that skips this makes the Suppressions tab
+    report success for a rule it will never act on.
+    """
+    try:
+        if es is None:
+            es = await get_es_client()
+        result = await es.search(
+            index="siem-suppressions",
+            body={
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"rule_id": rule_id}},
+                            {"term": {"status": "active"}},
+                        ],
+                        "should": [
+                            {"bool": {"must_not": {"exists": {"field": "expires_at"}}}},
+                            {"range": {"expires_at": {"gt": datetime.now(UTC).isoformat()}}},
+                        ],
+                        "minimum_should_match": 1,
+                    }
+                },
+                "size": 20,
+            },
+        )
+    except Exception:
+        return None  # Index may not exist yet
+
+    hits = result["hits"]["hits"]
+    if not hits:
+        return None
+
+    suppressions = [Suppression.from_es_hit(h) for h in hits]
+
+    # Step 1: Deterministic match
+    for s in suppressions:
+        if s.matches_context(context):
+            logger.info("suppression_deterministic_match", suppression_id=s.id, rule_id=rule_id)
+            return f"Auto-suppressed: {s.reason} (suppression {s.id})"
+
+    # Step 2: AI fallback, but only while the caller still has budget for
+    # it. The engine caps this per rule evaluation; a caller that passes
+    # None (new_client.py, a handful of alerts every five minutes) has no
+    # cap to apply.
+    if spend_ai_budget is not None and not spend_ai_budget(rule_id):
+        return None
+
+    try:
+        from siem.ai.suppression_matcher import ai_match_suppression
+
+        for s in suppressions:
+            matched = await ai_match_suppression(
+                suppression=s,
+                alert_context=context,
+                alert_rule_name=rule_name,
+                alert_description=rule_description,
+            )
+            if matched:
+                logger.info("suppression_ai_match", suppression_id=s.id, rule_id=rule_id)
+                return f"AI-matched suppression: {s.reason} (suppression {s.id})"
+    except Exception:
+        logger.debug("suppression_ai_fallback_error", rule_id=rule_id)
+
+    return None
