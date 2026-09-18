@@ -1,6 +1,7 @@
 from config.settings import settings
-from siem.detection.engine import build_rule_query
+from siem.detection.engine import _condition_to_es_clause, build_rule_query
 from siem.detection.rule_loader import load_rules
+from siem.models.rule import RuleCondition
 from siem.storage.indices import EVENT_INDEX_TEMPLATE
 
 
@@ -82,8 +83,53 @@ def test_the_gate_rules_read_the_syslog_source():
         assert rules[rule_id].source == "syslog"
 
 
-def test_the_gate_rules_build_valid_queries():
+def _must_clauses(rule_id: str) -> list[dict]:
     rules = {r.id: r for r in load_rules(settings.rules_dir)}
-    for rule_id in ("gate-egress-blocked", "tunnel-rotation-failed"):
-        q = build_rule_query(rules[rule_id])
-        assert q["query"]["bool"]["must"]
+    return build_rule_query(rules[rule_id])["query"]["bool"]["must"]
+
+
+def test_the_gate_rules_build_valid_queries():
+    """Assert the clauses, not just that there are some.
+
+    Asserting `must` is truthy passes for any rule at all, including one
+    whose condition translated to something that cannot match -- or, as
+    here, to something that matches far too much.
+    """
+    egress = _must_clauses("gate-egress-blocked")
+    assert {"term": {"source": "syslog"}} in egress
+    assert {"match": {"message": "REJECT"}} in egress
+    assert any("range" in c and "timestamp" in c["range"] for c in egress)
+
+    tunnel = _must_clauses("tunnel-rotation-failed")
+    assert {"term": {"source": "syslog"}} in tunnel
+    assert any("range" in c and "timestamp" in c["range"] for c in tunnel)
+
+
+def test_the_tunnel_rule_matches_the_whole_phrase_not_any_one_word():
+    """`contains` maps to ES `match`, which ORs its terms. With threshold 1
+    and severity high, "did not carry traffic" as a `contains` raised a HIGH
+    alert on any line containing "not" -- and a router's syslog is dense
+    with "not". Proven live: match returned hits on a Pi-hole line about
+    "does-not-exist"; match_phrase returned none."""
+    tunnel = _must_clauses("tunnel-rotation-failed")
+
+    assert {"match_phrase": {"message": "did not carry traffic"}} in tunnel
+    assert not any("match" in c for c in tunnel)
+
+
+def test_contains_still_ors_its_terms_for_the_rules_that_rely_on_it():
+    """Changing what `contains` means would silently alter every other
+    rule, so the fix added an operator rather than redefining one."""
+    clause = _condition_to_es_clause(
+        RuleCondition(field="message", operator="contains", value="REJECT")
+    )
+    assert clause == {"match": {"message": "REJECT"}}
+
+
+def test_an_unknown_operator_builds_nothing_rather_than_matching_everything():
+    assert (
+        _condition_to_es_clause(
+            RuleCondition(field="message", operator="phrasey", value="x")
+        )
+        is None
+    )

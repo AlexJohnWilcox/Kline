@@ -49,7 +49,16 @@ def _condition_to_es_clause(cond: RuleCondition) -> dict[str, Any] | None:
         case "eq":
             return {"term": {field: cond.value}}
         case "contains":
+            # Deliberately an OR over the value's terms: ES `match` defaults
+            # to operator "or". Existing rules rely on it with single-token
+            # values ("REJECT", "conntrack"), where it reads as substring
+            # matching. For a multi-word value use "phrase" -- `contains`
+            # with one would fire on any document containing any one word.
             return {"match": {field: cond.value}}
+        case "phrase":
+            # The whole value, in order, as written. This is what a
+            # multi-word "contains" looks like to someone reading the rule.
+            return {"match_phrase": {field: cond.value}}
         case "gt":
             return {"range": {field: {"gt": cond.value}}}
         case "lt":

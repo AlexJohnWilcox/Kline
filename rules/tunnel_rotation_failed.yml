@@ -9,7 +9,9 @@ severity: high
 source: syslog
 conditions:
   - field: message
-    operator: contains
+    # phrase, not contains: contains is an OR over the terms, so this rule
+    # would raise a HIGH alert on any syslog line containing "not".
+    operator: phrase
     value: "did not carry traffic"
 threshold: 1
 window_seconds: 900

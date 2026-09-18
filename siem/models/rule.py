@@ -7,7 +7,10 @@ from siem.models.event import EventSeverity
 
 class RuleCondition(BaseModel):
     field: str  # dot-path into parsed fields, e.g. "action" or "src_ip"
-    operator: str  # "eq", "contains", "gt", "lt", "regex", "exists"
+    # "eq", "contains", "phrase", "gt", "lt", "gte", "lte", "regex", "exists".
+    # "contains" matches ANY term of a multi-word value; "phrase" matches all
+    # of them, in order.
+    operator: str
     value: Any = None
 
 
