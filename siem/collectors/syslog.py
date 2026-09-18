@@ -1,7 +1,7 @@
 import asyncio
 import re
 import socket
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -138,19 +138,43 @@ def parse_syslog_line(line: str) -> Event | None:
 
     groups = match.groupdict()
 
-    # Parse timestamp
+    # Parse timestamp.
+    #
+    # BSD and OpenWrt lines carry local wall-clock time and no offset. Both
+    # the Gate and this host run on local time, so a naive value from either
+    # format is local. It must be made aware here: Event.to_es_doc()
+    # serialises with .isoformat(), and Elasticsearch reads an offset-less
+    # date as UTC -- which silently backdates every event by the local
+    # offset (four hours here) and puts it outside every detection window.
+    #
+    # datetime.astimezone(UTC) on a naive value interprets it as local and
+    # converts, which is exactly the needed semantics; on an already-aware
+    # value (the ISO format carries its own offset) it is a plain conversion
+    # and cannot double-shift.
     try:
         if fmt == "iso":
-            timestamp = datetime.fromisoformat(groups['timestamp'])
+            timestamp = datetime.fromisoformat(groups["timestamp"]).astimezone(UTC)
         elif fmt == "openwrt":
-            # Same naive-datetime shape as the BSD branch below (no offset
-            # in the source format); matches its existing DTZ007 tolerance.
-            timestamp = datetime.strptime(  # noqa: DTZ007
+            timestamp = datetime.strptime(  # noqa: DTZ007 - local by format, see above
                 groups["timestamp"], "%b %d %H:%M:%S %Y"
-            )
+            ).astimezone(UTC)
         else:
-            ts_str = f"{datetime.now(UTC).year} {groups['timestamp']}"
-            timestamp = datetime.strptime(ts_str, "%Y %b %d %H:%M:%S")
+            # BSD syslog carries no year, so it has to be inferred -- from
+            # the *local* year, since that is the clock that wrote the line.
+            # Using the UTC year is wrong for the last hours of 31 December,
+            # when UTC has already rolled over and local time has not.
+            local_now = datetime.now(UTC).astimezone()
+            ts_str = f"{local_now.year} {groups['timestamp']}"
+            naive = datetime.strptime(ts_str, "%Y %b %d %H:%M:%S")  # noqa: DTZ007
+            # The other half of the New Year boundary: on 1 January a line
+            # stamped "Dec 31 23:59" takes the new year and lands twelve
+            # months in the future, outside every window in the same way the
+            # missing offset put it in the past. Nothing a tail-from-EOF
+            # collector reads is legitimately a day ahead of now, so treat
+            # that as last year's December.
+            if naive.astimezone(UTC) - local_now > timedelta(days=1):
+                naive = naive.replace(year=naive.year - 1)
+            timestamp = naive.astimezone(UTC)
     except ValueError:
         timestamp = datetime.now(UTC)
 

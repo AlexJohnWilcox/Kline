@@ -58,13 +58,22 @@ def test_second_dropbear_line_is_also_parsed():
 
 
 def test_openwrt_timestamp_uses_its_own_four_digit_year():
+    """The line's own year, and the line's own wall clock.
+
+    The stored value is UTC (the Gate writes local time with no offset, and
+    an offset-less timestamp is read as UTC by Elasticsearch), so the
+    assertion converts back to local before reading the clock. Asserting the
+    UTC components here is what hid the missing-offset defect.
+    """
     event = parse_syslog_line(ROAD_ROTATION)
-    assert event.timestamp.year == 2026
-    assert event.timestamp.month == 9
-    assert event.timestamp.day == 18
-    assert event.timestamp.hour == 3
-    assert event.timestamp.minute == 11
-    assert event.timestamp.second == 50
+    assert event.timestamp.tzinfo is not None
+    local = event.timestamp.astimezone()
+    assert local.year == 2026
+    assert local.month == 9
+    assert local.day == 18
+    assert local.hour == 3
+    assert local.minute == 11
+    assert local.second == 50
 
 
 def test_err_level_escalates_severity_even_without_a_fail_keyword():
