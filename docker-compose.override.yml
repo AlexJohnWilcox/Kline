@@ -1,0 +1,16 @@
+# erebus-local overrides.
+#
+# Heap: the base compose file pins 512m, which is right for a laptop demo and
+# wrong here. This host holds ~55k DNS events a day across 30+ daily indices,
+# and the 30-day cold-start backfill writes ~1.28 million documents in one
+# burst - the only moment the heap is really under pressure. erebus has 23G
+# free, so 2G costs nothing it needs elsewhere.
+#
+# Restart: the base file sets no policy at all, so Elasticsearch would not come
+# back after a reboot and Kline would start into a dead backend. `unless-stopped`
+# matches what the Oracle's own compose services use.
+services:
+  elasticsearch:
+    environment:
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+    restart: unless-stopped
