@@ -35,6 +35,31 @@ GROUP_BY_BUCKET_SIZE = 50
 AI_SUPPRESSION_BUCKET_BUDGET = 3
 
 
+class AiSuppressionBudget:
+    """One allowance of AI suppression-matcher calls, and how to spend it.
+
+    The mechanism, in one place, for every caller that raises alerts:
+    DetectionEngine takes a fresh one per rule evaluation, new_client.py
+    per pass. Both hand `spend` to check_suppressions as spend_ai_budget.
+    """
+
+    def __init__(self, budget: int = AI_SUPPRESSION_BUCKET_BUDGET):
+        self.budget = budget
+        self.remaining = budget
+
+    def spend(self, rule_id: str) -> bool:
+        """Take one unit, or report that there is none left."""
+        if self.remaining <= 0:
+            logger.warning(
+                "suppression_ai_budget_exhausted",
+                rule_id=rule_id,
+                budget=self.budget,
+            )
+            return False
+        self.remaining -= 1
+        return True
+
+
 def _resolve_field(name: str) -> str:
     """Map a rule's field name to its Elasticsearch path."""
     if "." in name or name in TOP_LEVEL_FIELDS:
@@ -158,7 +183,7 @@ class DetectionEngine:
         self._last_reload: datetime = datetime.min.replace(tzinfo=UTC)
         self._last_expiry_check: datetime = datetime.min.replace(tzinfo=UTC)
         # Reset per rule evaluation; see AI_SUPPRESSION_BUCKET_BUDGET.
-        self._ai_suppression_budget = AI_SUPPRESSION_BUCKET_BUDGET
+        self._ai_suppression_budget = AiSuppressionBudget()
 
     @property
     def rules(self) -> dict[str, DetectionRule]:
@@ -216,7 +241,7 @@ class DetectionEngine:
     async def _evaluate_rule(self, es: AsyncElasticsearch, rule: DetectionRule) -> None:
         """Evaluate a single rule against Elasticsearch."""
         # One budget per rule per pass, spent by _check_suppressions below.
-        self._ai_suppression_budget = AI_SUPPRESSION_BUCKET_BUDGET
+        self._ai_suppression_budget = AiSuppressionBudget()
         query = build_rule_query(rule)
         result = await es.search(index="siem-events-*", body=query)
         hits = result["hits"]["hits"]
@@ -486,26 +511,9 @@ class DetectionEngine:
             rule.name,
             rule.description,
             context,
-            spend_ai_budget=self._spend_ai_budget,
+            spend_ai_budget=self._ai_suppression_budget.spend,
             es=es,
         )
-
-    def _spend_ai_budget(self, rule_id: str) -> bool:
-        """Take one unit of this rule evaluation's AI suppression budget.
-
-        A grouped rule raises one alert per breaching bucket and each one
-        reaches the AI fallback; unbounded, that serialises 10s-a-piece
-        calls inside a 30s detection loop.
-        """
-        if self._ai_suppression_budget <= 0:
-            logger.warning(
-                "suppression_ai_budget_exhausted",
-                rule_id=rule_id,
-                budget=AI_SUPPRESSION_BUCKET_BUDGET,
-            )
-            return False
-        self._ai_suppression_budget -= 1
-        return True
 
     def _cleanup_cooldowns(self) -> None:
         """Remove expired cooldown entries."""
@@ -571,9 +579,8 @@ async def check_suppressions(
             return f"Auto-suppressed: {s.reason} (suppression {s.id})"
 
     # Step 2: AI fallback, but only while the caller still has budget for
-    # it. The engine caps this per rule evaluation; a caller that passes
-    # None (new_client.py, a handful of alerts every five minutes) has no
-    # cap to apply.
+    # it. Every alert-raising caller passes an AiSuppressionBudget.spend:
+    # the engine one per rule evaluation, new_client.py one per pass.
     if spend_ai_budget is not None and not spend_ai_budget(rule_id):
         return None
 

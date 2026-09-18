@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 import structlog
 
 from config.settings import settings
-from siem.detection.engine import check_suppressions
+from siem.detection.engine import AiSuppressionBudget, check_suppressions
 from siem.models.alert import Alert
 from siem.models.event import EventSeverity
 from siem.storage.es_client import get_es_client
@@ -48,6 +48,13 @@ async def check_new_clients(es) -> list[str]:
 
     hours = max(1, settings.new_client_interval_seconds // 3600 + 1)
     new = await find_new_clients(es, seen, hours=hours)
+    # One allowance for the whole pass. The AI fallback costs alerts x
+    # active suppressions x the matcher's 10s timeout, and this loop runs
+    # inside the detector's own interval: five new clients against twenty
+    # suppressions is seventeen minutes of serialised AI. Same mechanism
+    # the engine uses, same cap. Clients past the budget still get the
+    # deterministic field match, and the next pass reconsiders them.
+    budget = AiSuppressionBudget()
     for client in sorted(new):
         description = (
             f"{client} resolved a name and is absent from the "
@@ -63,12 +70,9 @@ async def check_new_clients(es) -> list[str]:
         # itself too. Without this the Alerts page happily creates a
         # suppression from a dns-new-client alert, stores it, lists it in
         # the Suppressions tab -- and nothing ever reads it.
-        #
-        # No AI budget: unlike a grouped rule, which can reach here once per
-        # bucket inside a 30s loop, this raises at most a handful of alerts
-        # every five minutes.
         suppression_msg = await check_suppressions(
-            RULE_ID, RULE_NAME, description, context, es=es
+            RULE_ID, RULE_NAME, description, context,
+            spend_ai_budget=budget.spend, es=es,
         )
 
         alert = Alert(

@@ -12,7 +12,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from siem.detection import new_client
-from siem.detection.engine import DetectionEngine, check_suppressions
+from siem.detection.engine import (
+    AI_SUPPRESSION_BUCKET_BUDGET,
+    AiSuppressionBudget,
+    DetectionEngine,
+    check_suppressions,
+)
 from siem.models.rule import DetectionRule
 from siem.models.suppression import Suppression
 
@@ -112,7 +117,7 @@ async def test_the_engine_call_site_still_behaves_the_same_way():
     """The refactor must not change what DetectionEngine does. The AI budget
     is still per rule evaluation and still spent only at the fallback."""
     engine = DetectionEngine()
-    engine._ai_suppression_budget = 1
+    engine._ai_suppression_budget = AiSuppressionBudget(1)
     rule = DetectionRule(
         id="dns-new-client",
         name="x",
@@ -135,7 +140,7 @@ async def test_the_engine_call_site_still_behaves_the_same_way():
         engine_module.get_es_client = original
 
     assert msg is not None
-    assert engine._ai_suppression_budget == 1
+    assert engine._ai_suppression_budget.remaining == 1
 
 
 @pytest.mark.asyncio
@@ -157,3 +162,57 @@ async def test_the_budget_callback_stops_the_ai_fallback():
         engine_module.get_es_client = original
 
     assert msg is None
+
+
+# --- the AI fallback is bounded here too -----------------------------------
+
+
+class ManyClientsES(RecordingES):
+    """Several genuinely new clients in one pass, none of them matched
+    deterministically by the active suppressions."""
+
+    def __init__(self, suppressions, clients):
+        super().__init__(suppressions=suppressions, seen=())
+        self._clients = list(clients)
+
+    async def get(self, index, id):
+        return {"_source": {"values": []}}
+
+    async def search(self, index=None, body=None, **kw):
+        if index == "siem-suppressions":
+            self.suppression_searches += 1
+            hits = [
+                {"_id": s.id, "_source": s.model_dump(mode="json")}
+                for s in self._suppressions
+            ]
+            return {"hits": {"total": {"value": len(hits)}, "hits": hits}}
+        return {
+            "hits": {"total": {"value": 0}, "hits": []},
+            "aggregations": {"clients": {"buckets": [{"key": c} for c in self._clients]}},
+        }
+
+
+@pytest.mark.asyncio
+async def test_the_ai_fallback_is_bounded_for_new_clients_too(monkeypatch):
+    """Unbounded, the cost here is new clients x active suppressions x the
+    matcher's 10s timeout, serialised inside the detector's own interval:
+    five clients against twenty suppressions is about seventeen minutes.
+    """
+    calls = []
+
+    async def fake_ai_match(**kwargs):
+        calls.append(kwargs["alert_context"])
+        return False
+
+    monkeypatch.setattr(
+        "siem.ai.suppression_matcher.ai_match_suppression", fake_ai_match
+    )
+    suppressions = [_suppression(host="10.0.0.1"), _suppression(host="10.0.0.2")]
+    es = ManyClientsES(suppressions, [f"192.168.10.{i}" for i in range(10)])
+
+    await new_client.check_new_clients(es)
+
+    # Ten clients would have cost 20 matcher calls. The budget is per pass,
+    # and clients past it still got the deterministic match.
+    assert len(calls) == AI_SUPPRESSION_BUCKET_BUDGET * len(suppressions)
+    assert len(_alerts(es)) == 10, "every client still gets its alert"
