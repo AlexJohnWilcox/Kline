@@ -1,10 +1,13 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import structlog
 from elasticsearch import AsyncElasticsearch
 
 from siem.models.event import Event
 from siem.storage.indices import get_event_index
+
+logger = structlog.get_logger()
 
 
 async def search_events(
@@ -137,3 +140,73 @@ async def get_event_stats(
         "by_host": result["aggregations"]["by_host"]["buckets"],
         "timeline": result["aggregations"]["timeline"]["buckets"],
     }
+
+
+async def get_device_stats(
+    es: AsyncElasticsearch,
+    *,
+    hours: int = 24,
+) -> list[dict[str, Any]]:
+    """Per-device activity for the Events page panel.
+
+    Returns hosts, not names: naming happens at the API layer so that a
+    rename never has to touch stored data.
+    """
+    time_from = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+
+    events_body = {
+        "query": {"range": {"timestamp": {"gte": time_from}}},
+        "size": 0,
+        "track_total_hits": True,
+        "aggs": {
+            "by_host": {
+                "terms": {"field": "host", "size": 50, "order": {"_count": "desc"}},
+                "aggs": {
+                    "blocked": {"filter": {"term": {"parsed.blocked": True}}},
+                    "last_seen": {"max": {"field": "timestamp"}},
+                },
+            }
+        },
+    }
+    result = await es.search(index="siem-events-*", body=events_body)
+    buckets = result["aggregations"]["by_host"]["buckets"]
+
+    # Open alerts per device. context.hosts carries the addresses an alert was
+    # raised for. A resolved alert is not something the panel should badge.
+    #
+    # .keyword, not context.hosts: a terms aggregation refuses an analysed
+    # text field ("Fielddata is disabled"), where a term query would have been
+    # fine. Measured against the live index before this was written.
+    alerts_body = {
+        "query": {"bool": {"must_not": [{"term": {"status": "resolved"}}]}},
+        "size": 0,
+        "aggs": {"by_host": {"terms": {"field": "context.hosts.keyword", "size": 50}}},
+    }
+    try:
+        alert_result = await es.search(index="siem-alerts-*", body=alerts_body)
+        alert_counts = {
+            b["key"]: b["doc_count"]
+            for b in alert_result["aggregations"]["by_host"]["buckets"]
+        }
+    except Exception:
+        # No alert index yet, or a mapping that cannot aggregate. The panel is
+        # still useful without badges; it is not worth failing the whole call.
+        logger.exception("device_alert_counts_failed")
+        alert_counts = {}
+
+    rows: list[dict[str, Any]] = []
+    for b in buckets:
+        total = b["doc_count"]
+        blocked = b["blocked"]["doc_count"]
+        rows.append(
+            {
+                "host": b["key"],
+                "events": total,
+                "blocked_pct": round(blocked / total * 100, 1) if total else 0.0,
+                "last_seen": b["last_seen"].get("value_as_string")
+                if b["last_seen"].get("value") is not None
+                else None,
+                "open_alerts": alert_counts.get(b["key"], 0),
+            }
+        )
+    return rows
