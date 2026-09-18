@@ -83,10 +83,17 @@ class DeviceResolver:
             resp = await self._client.get(self.url)
             resp.raise_for_status()
             names = parse_roster(resp.json())
-        except (httpx.HTTPError, ValueError) as exc:
-            # httpx.HTTPError covers transport failures, timeouts and
-            # raise_for_status(); ValueError covers resp.json() on an
-            # unparseable body (json.JSONDecodeError is a ValueError).
+        except Exception as exc:  # noqa: BLE001
+            # Deliberately blind: the contract is "never raises to the
+            # caller", not "never raises for exception types we predicted".
+            # httpx.InvalidURL and httpx.CookieConflict, for example, are
+            # Exception subclasses that don't derive from httpx.HTTPError,
+            # so a narrower catch lets a config typo (a malformed
+            # device_roster_url, which is an unvalidated plain str) escape
+            # refresh() and kill Task 6's bare `while True: await
+            # resolver.refresh(es)` loop for the life of the process. A
+            # blind catch here is what keeps a config mistake as a logged
+            # failure rather than a permanently dead background task.
             logger.warning(
                 "device_roster_fetch_failed",
                 url=self.url,

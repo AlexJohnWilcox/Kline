@@ -145,3 +145,26 @@ async def test_the_cached_map_is_loaded_on_startup():
 async def test_no_cache_yet_loads_as_empty():
     r = DeviceResolver(url="https://dash.lan/data.json")
     assert await r.load(FakeES()) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_roster_url_fails_before_any_transport_and_does_not_raise():
+    """device_roster_url is a bare, unvalidated str: a typo raises out of
+    httpx's own URL parsing (e.g. httpx.InvalidURL), never reaching the
+    MockTransport the other tests go through. refresh() must still degrade
+    instead of letting that escape and kill the caller's refresh loop.
+    """
+    es = FakeES()
+    r = DeviceResolver(url="http://[::1")
+    assert await r.refresh(es) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_roster_url_does_not_erase_a_prior_good_map():
+    es = FakeES()
+    r = _resolver(lambda req: httpx.Response(200, json=SAMPLE))
+    await r.refresh(es)
+
+    r.url = "http://[::1"
+    names = await r.refresh(es)
+    assert names["192.168.10.241"] == "scrying-glass"
