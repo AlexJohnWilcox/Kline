@@ -58,7 +58,9 @@ async def lifespan(app: FastAPI):
             drop_patterns=syslog_drop_patterns,
         )
     )
-    collector_runner.register(DockerCollector())
+    collector_runner.register(
+        DockerCollector(drop_patterns=settings.docker_drop_pattern_list())
+    )
     collector_runner.register(NetworkCollector())
     if settings.pihole_enabled:
         collector_runner.register(
