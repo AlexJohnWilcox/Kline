@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     # `"" or None` collapsed them and left no way to turn dropping off.
     syslog_drop_patterns: str | None = None
 
+    # The same idea for Docker. Unset uses the collector's own defaults,
+    # which drop Kline's Elasticsearch healthcheck -- 43% of all events
+    # collected on the live deployment before it was filtered. An explicitly
+    # empty DOCKER_DROP_PATTERNS="" ingests everything, healthcheck included.
+    docker_drop_patterns: str | None = None
+
     # Device names - resolved from the sanctum's own roster at render time,
     # never written onto events. Off by default: without it every host shows
     # as its raw address, which is the behaviour this replaces.
@@ -112,6 +118,18 @@ class Settings(BaseSettings):
         if self.syslog_drop_patterns is None:
             return None
         return [p.strip() for p in self.syslog_drop_patterns.split(",") if p.strip()]
+
+    def docker_drop_pattern_list(self) -> list[str] | None:
+        """Parse docker_drop_patterns. See syslog_drop_pattern_list.
+
+        A regex may legitimately contain a comma (`exec_\\w{1,3}`), so this
+        splitting is a known limitation shared with the syslog setting; the
+        defaults avoid one, and a pattern that needs one can be supplied in
+        code.
+        """
+        if self.docker_drop_patterns is None:
+            return None
+        return [p.strip() for p in self.docker_drop_patterns.split(",") if p.strip()]
 
 
 settings = Settings()
