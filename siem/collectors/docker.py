@@ -28,11 +28,30 @@ PRIVILEGED_PATTERN = re.compile(r"privileged", re.IGNORECASE)
 # hours -- the instrument spending itself watching its own heartbeat, and
 # skewing the volume baseline the anomaly detector is built on.
 #
-# The pattern targets the healthcheck command rather than the container name,
-# so it keeps working if the container is renamed, and it deliberately does
-# NOT drop every exec: `docker exec -it siem-elasticsearch bash` is someone
-# getting a shell inside the database, which is exactly what a SIEM is for.
-DEFAULT_DROP_PATTERNS = [r"exec_\w+: .*/_cluster/health"]
+# The default is anchored and exact, and it is deliberately not a loose
+# substring match on the command. An earlier version matched
+# `exec_\w+: .*/_cluster/health` anywhere in the signature, which was an
+# evasion vector in a security tool: anyone with exec access to ANY container
+# could append `# /_cluster/health` to a command and suppress the logging of
+# their own exec. It also swallowed a second Elasticsearch-backed container's
+# legitimate healthcheck, since it never looked at which container it was.
+#
+# Matching the whole signature ties the drop to Docker's own labels -- the
+# compose project and container name, which the command cannot forge -- so
+# only Kline's own Elasticsearch healthcheck, running exactly the command
+# Kline's compose file gives it, is ever dropped. If that command changes the
+# pattern stops matching and the noise comes back, which is the right way for
+# this to fail: noisily, not blindly.
+#
+# It also does NOT drop every exec. `docker exec -it siem-elasticsearch bash`
+# is someone getting a shell inside the database, which is exactly what a
+# SIEM is for.
+DEFAULT_DROP_PATTERNS = [
+    (
+        r"^kline siem-elasticsearch exec_\w+: /bin/sh -c "
+        r"curl -f http://localhost:9200/_cluster/health \|\| exit 1$"
+    )
+]
 
 # How many filtered exec ids to remember while waiting for their exec_die.
 # At the observed rate of one healthcheck every ten seconds this is hours of
@@ -74,11 +93,19 @@ def should_ingest(
 ) -> bool:
     """False when this event matches a drop pattern.
 
-    Patterns are matched against `<container name> <action>`, so they can
-    target a container, a verb, a command, or any combination. `patterns`
-    must be a list -- the collector resolves an unset setting to
+    Patterns are matched against `<compose project> <container name>
+    <action>`, so they can target a project, a container, a verb, a command,
+    or any combination. The project and name come from Docker's own labels
+    and cannot be influenced by the command being run -- which is why they
+    are in the signature at all. Anchor your patterns: an unanchored one
+    that matches only on command text lets any container opt itself out of
+    logging by embedding the magic substring.
+
+    `patterns` must be a list -- the collector resolves an unset setting to
     DEFAULT_DROP_PATTERNS before calling, and an explicitly empty list means
-    "drop nothing", a distinction None would erase.
+    "drop nothing", a distinction None would erase. `dropped_execs`, by
+    contrast, may be None: "do not correlate" is a sensible default, whereas
+    there is no safe default set of patterns. Do not make them symmetric.
 
     `dropped_execs` correlates the three events a single exec produces.
     Docker reports exec_create and exec_start with the command attached, but
@@ -89,12 +116,16 @@ def should_ingest(
 
     The map is bounded: an id is forgotten when its die arrives, and the
     oldest are evicted past _EXEC_MEMORY so a die that never comes cannot
-    grow it without limit.
+    grow it without limit. Eviction fails in the safe direction -- an evicted
+    id's die is kept, so a stray healthcheck die is ingested. It can never
+    cause a real exec's die to be dropped, because only ids that were
+    themselves filtered ever enter the map.
     """
     if patterns is None:
         raise TypeError("patterns must be a list; resolve None to a default first")
     attributes = data.get("Actor", {}).get("Attributes", {})
     name = attributes.get("name", "")
+    project = attributes.get("com.docker.compose.project", "")
     action = data.get("status") or data.get("Action", "")
     exec_id = attributes.get("execID")
 
@@ -107,7 +138,21 @@ def should_ingest(
         del dropped_execs[exec_id]
         return False
 
-    if any(re.search(p, f"{name} {action}") for p in patterns):
+    signature = f"{project} {name} {action}"
+    matched = False
+    for pattern in patterns:
+        try:
+            if re.search(pattern, signature):
+                matched = True
+                break
+        except re.error:
+            # A typo in config must not stop the collector. Keeping a noisy
+            # event is far cheaper than ingesting nothing -- and an uncaught
+            # error here escapes to the per-connection handler, which tears
+            # down and reopens the whole /events stream on every event.
+            logger.warning("docker_drop_pattern_invalid", pattern=pattern)
+
+    if matched:
         if dropped_execs is not None and exec_id is not None:
             dropped_execs[exec_id] = None
             while len(dropped_execs) > _EXEC_MEMORY:
