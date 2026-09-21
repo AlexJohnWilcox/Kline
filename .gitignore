@@ -18,3 +18,21 @@ env/
 htmlcov/
 .coverage
 node_modules/
+
+# --- AI assistant working files: never versioned ---
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+[Ll]essons.md
+LESSONS.md
+.claude/
+.superpowers/
+docs/superpowers/
+.playwright-mcp/
+.serena/
+.cursor/
+docs/UNITYMCP.md
+docs/BLENDERMCP.md
+.mcp.json
+PROGRESS.md
+ai-siem-code-map.html
