@@ -44,8 +44,15 @@ async def lifespan(app: FastAPI):
     es = await get_es_client()
     await setup_indices(es)
 
-    # Seed the admin account on first boot (idempotent).
-    await seed_admin_if_missing(settings.admin_username, settings.admin_password)
+    # Seed the admin account on first boot (idempotent). Both values must be
+    # supplied; there is deliberately no built-in default in a public repo.
+    if settings.admin_username and settings.admin_password:
+        await seed_admin_if_missing(settings.admin_username, settings.admin_password)
+    else:
+        logger.warning(
+            "admin_seed_skipped",
+            reason="ADMIN_USERNAME and ADMIN_PASSWORD must both be set to seed an admin",
+        )
 
     # Register and start collectors
     syslog_paths = settings.syslog_path_list()

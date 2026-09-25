@@ -159,3 +159,12 @@ def test_the_collector_honours_each_of_the_three_states():
     )
     assert SyslogCollector(paths=[], drop_patterns=[]).drop_patterns == []
     assert SyslogCollector(paths=[], drop_patterns=["x"]).drop_patterns == ["x"]
+
+
+def test_admin_credentials_have_no_default(monkeypatch):
+    """The repo is public; a built-in admin credential is a published one."""
+    monkeypatch.delenv("ADMIN_USERNAME", raising=False)
+    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+    s = Settings(_env_file=None)
+    assert s.admin_username is None
+    assert s.admin_password is None

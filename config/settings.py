@@ -88,9 +88,12 @@ class Settings(BaseSettings):
     session_cookie_name: str = "kline_session"
     session_max_age_seconds: int = 43200  # 12 hours
     session_https_only: bool = False
-    # First-boot admin seed — only used if no user with this username exists.
-    admin_username: str = "alexwilcox"
-    admin_password: str = "REDACTED"
+    # First-boot admin seed -- only used if no user with this username exists.
+    # No defaults on purpose: this repo is public, and a built-in credential is
+    # a published one. Leave both unset and no admin is seeded; the startup log
+    # says so and the login page stays closed until they are provided.
+    admin_username: str | None = None
+    admin_password: str | None = None
 
     # New-device detection. Off by default: it writes alerts, and it must be
     # seeded before it is useful.
